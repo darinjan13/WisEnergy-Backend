@@ -8,13 +8,15 @@ app = FastAPI()
 
 PH_TZ = timezone("Asia/Manila")
 
-# Initialize Firebase Admin
 cred = credentials.Certificate("serviceAccountKey.json")
-initialize_app(cred, {
-    "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
-})
+initialize_app(
+    cred,
+    {
+        "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
+    },
+)
 
-# 🔁 Daily summary logic (skip if total_kWh is 0)
+
 def daily_total_energy_consumption():
     now_ph = datetime.now(PH_TZ)
     target_date = now_ph.strftime("%Y-%m-%d")
@@ -33,9 +35,17 @@ def daily_total_energy_consumption():
                     if date == target_date:
                         total_kwh += summary.get("total_kWh", 0)
 
-        user_total_ref = db.reference(f"/daily_total_consumption/{user_id}/{target_date}/total_energy_consumption")
-        user_total_ref.set(round(total_kwh, 6))
-        print(f"✅ Total energy for {user_id} on {target_date}: {total_kwh:.6f} kWh")
+        daily_total_consumption_ref = db.reference(
+            f"/daily_total_consumption/{user_id}/{target_date}/total_energy_consumption"
+        )
+        daily_total_consumption_ref.set(round(total_kwh, 2))
+
+        user_total_ref = db.reference(f"/users/{user_id}/total_energy_consumption")
+        prev_total = user_total_ref.get() or 0
+        new_total = round(prev_total + total_kwh, 2)
+        user_total_ref.set(new_total)
+        print(f"✅ Total energy for {user_id} on {target_date}: {total_kwh:.2f} kWh")
+
 
 def daily_summary_aggregation():
     now_ph = datetime.now(PH_TZ)
@@ -64,30 +74,43 @@ def daily_summary_aggregation():
 
                 total_kwh = sum((p / 1000) * (interval_seconds / 3600) for p in powers)
                 if total_kwh == 0:
-                    print(f"⏩ Skipped summary for {user_id} | {device_id} | {appliance_name} — 0 kWh")
+                    print(
+                        f"⏩ Skipped summary for {user_id} | {device_id} | {appliance_name} — 0 kWh"
+                    )
                     continue
 
                 avg_power = sum(powers) / len(powers)
                 max_power = max(powers)
 
-                summary_ref = db.reference(f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}")
-                summary_ref.set({
-                    "total_kWh": round(total_kwh, 6),
-                    "avg_power": round(avg_power, 2),
-                    "max_power": round(max_power, 2),
-                    "updated_at": now_str
-                })
+                summary_ref = db.reference(
+                    f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
+                )
+                summary_ref.set(
+                    {
+                        "total_kWh": round(total_kwh, 6),
+                        "avg_power": round(avg_power, 2),
+                        "max_power": round(max_power, 2),
+                        "updated_at": now_str,
+                    }
+                )
 
-                print(f"✅ Summary saved for {user_id} | {device_id} | {appliance_name} | {target_date}")
+                print(
+                    f"✅ Summary saved for {user_id} | {device_id} | {appliance_name} | {target_date}"
+                )
+
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(daily_summary_aggregation, 'cron', hour=0, minute=5, timezone=PH_TZ)
-scheduler.add_job(daily_total_energy_consumption, 'cron', hour=0, minute=10, timezone=PH_TZ)
+scheduler.add_job(daily_summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
+scheduler.add_job(
+    daily_total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ
+)
 scheduler.start()
+
 
 @app.get("/")
 def root():
     return {"message": "WisEnergy daily summary updater is active."}
+
 
 @app.api_route("/ping", methods=["GET", "HEAD"])
 def ping(request: Request):
@@ -95,10 +118,11 @@ def ping(request: Request):
         return Response(status_code=200)
     return {"message": "pong"}
 
+
 @app.get("/status")
 def status():
     return {
         "status": "running",
         "server_time": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-        "scheduler": "active"
+        "scheduler": "active",
     }
