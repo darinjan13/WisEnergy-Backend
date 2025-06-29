@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from firebase_admin import credentials, db, initialize_app
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
@@ -89,14 +89,10 @@ scheduler.start()
 def root():
     return {"message": "WisEnergy daily summary updater is active."}
 
-@app.get("/sample")
-def sample():
-    daily_total_energy_consumption()
-    daily_summary_aggregation()
-    return {"message": "Sample daily total energy consumption function executed."}
-
-@app.get("/ping")
-def ping():
+@app.api_route("/ping", methods=["GET", "HEAD"])
+def ping(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
     return {"message": "pong"}
 
 @app.get("/status")
