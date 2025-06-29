@@ -48,8 +48,7 @@ def daily_summary_aggregation():
         print("⚠️ No usage data.")
         return
 
-    # target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    target_date = (datetime.now()).strftime("%Y-%m-%d")
+    target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     interval_seconds = 5
 
     for user_id, devices in usage_data.items():
