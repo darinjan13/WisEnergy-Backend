@@ -1,3 +1,4 @@
+import threading
 from fastapi import FastAPI, Request, Response
 from firebase_admin import credentials, db, initialize_app
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -58,7 +59,7 @@ def daily_summary_aggregation():
         print("⚠️ No usage data.")
         return
 
-    target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")
     interval_seconds = 5
 
     for user_id, devices in usage_data.items():
@@ -99,12 +100,62 @@ def daily_summary_aggregation():
                 )
 
 
+def update_latest_kwh(user_id, device_id, appliance_name, date, interval_seconds=3):
+    usage_day_ref = db.reference(
+        f"/usage/{user_id}/{device_id}/{appliance_name}/{date}"
+    )
+    day_data = usage_day_ref.get() or {}
+    print(usage_day_ref.path)
+
+    powers = [
+        entry.get("power", 0)
+        for key, entry in day_data.items()
+        if isinstance(entry, dict)
+    ]
+    total_kwh = sum((p / 1000) * (interval_seconds / 3600) for p in powers)
+
+    appliance_ref = db.reference(
+        f"/appliances/{user_id}/{device_id}/{appliance_name}/latest_kwh"
+    )
+    print(total_kwh)
+    appliance_ref.set(round(total_kwh, 2))
+
+
+def listen_for_active_appliances():
+    print("Listener function started")
+    ref = db.reference("/appliances")
+
+    def listener(event):
+        if isinstance(event.data, dict):
+            for key, value in event.data.items():
+                if key.endswith("/is_active") and value == True:
+                    path = event.path + "/" + key
+                    parts = path.strip("/").split("/")
+                    if len(parts) >= 4:
+                        print("ASD", key)
+                        user_id, device_id, appliance_name, _ = parts
+                        now_ph = datetime.now(PH_TZ)
+                        today = now_ph.strftime("%Y-%m-%d")
+                        print(
+                            f"🔔 Detected active appliance: {user_id} | {device_id} | {appliance_name} | {today}"
+                        )
+                        update_latest_kwh(user_id, device_id, appliance_name, today)
+
+    ref.listen(listener)
+
+
+def start_listener():
+    threading.Thread(target=listen_for_active_appliances, daemon=True).start()
+
+
 scheduler = BackgroundScheduler()
 scheduler.add_job(daily_summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(
     daily_total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ
 )
 scheduler.start()
+
+start_listener()
 
 
 @app.get("/")
