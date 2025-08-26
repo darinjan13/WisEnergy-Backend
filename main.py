@@ -1,10 +1,8 @@
-import threading
 from fastapi import FastAPI, Request, Response
 from firebase_admin import credentials, db, initialize_app
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from pytz import timezone
-import random
 
 app = FastAPI()
 
@@ -22,18 +20,11 @@ initialize_app(
 def summary_aggregation():
     now_ph = datetime.now(PH_TZ)
     now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
-    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")
-    month_key = now_ph.strftime("%Y-%m")
+    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")  # yesterday
     interval_seconds = 5
 
     is_monday = now_ph.weekday() == 0
     is_first_of_month = now_ph.day == 1
-
-    def get_week_label(date):
-        start_of_week = date - timedelta(days=date.weekday())
-        end_of_week = start_of_week + timedelta(days=6)
-        week_number = int(start_of_week.strftime("%U"))
-        return f"Week {week_number} ({start_of_week.strftime('%b %d')}–{end_of_week.strftime('%d')})"
 
     print("📊 Starting summary aggregation...")
 
@@ -42,19 +33,20 @@ def summary_aggregation():
         print("⚠️ No usage data.")
         return
 
-    for user_id, devices in usage_root.items():
-        for device_id, appliances in devices.items():
-            for appliance_name, dates in appliances.items():
-                # -- DAILY --
-                day_data = dates.get(target_date)
+    for user_id, devices in (usage_root or {}).items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name, dates in (appliances or {}).items():
+                day_data = (dates or {}).get(target_date)
                 if not day_data:
                     continue
 
-                powers = [record.get("power", 0) for record in day_data.values()]
+                powers = [float(rec.get("power", 0)) for rec in day_data.values()]
                 if not powers:
                     continue
 
-                total_kwh = sum((p / 1000) * (interval_seconds / 3600) for p in powers)
+                total_kwh = sum(
+                    (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
+                )
                 avg_power = sum(powers) / len(powers)
                 max_power = max(powers)
 
@@ -69,118 +61,128 @@ def summary_aggregation():
                     }
                 )
 
-                # -- WEEKLY --
-                if is_monday:
-                    last_7_days = [
-                        (now_ph - timedelta(days=i)).strftime("%Y-%m-%d")
-                        for i in range(7)
-                    ]
-                    total_kwh_week = 0
-                    for d in last_7_days:
+    if is_monday:
+        prev_week_end = now_ph - timedelta(days=1)
+        prev_week_start = prev_week_end - timedelta(days=6)
+        y = str(prev_week_start.year)
+        m = f"{prev_week_start.month:02d}"
+        w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
+        days = [
+            (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)
+        ]
+
+        for user_id, devices in (usage_root or {}).items():
+            for device_id, appliances in (devices or {}).items():
+                for appliance_name in (appliances or {}).keys():
+                    total_kwh_week = 0.0
+                    for d in days:
                         summary = db.reference(
                             f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
                         ).get()
                         if summary:
-                            total_kwh_week += summary.get("total_kWh", 0)
-
-                    week_label = get_week_label(now_ph)
-                    db.reference(
-                        f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{week_label}"
-                    ).set(
-                        {"total_kWh": round(total_kwh_week, 6), "updated_at": now_str}
-                    )
-
-                # -- MONTHLY --
-                if is_first_of_month:
-                    total_kwh_month = 0
-                    for d, summary in dates.items():
-                        if d.startswith(month_key):
-                            total_kwh_month += summary.get("total_kWh", 0)
+                            total_kwh_week += float(summary.get("total_kWh", 0.0))
 
                     db.reference(
-                        f"/monthly_summary/{user_id}/{device_id}/{appliance_name}/{month_key}"
+                        f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
                     ).set(
-                        {"total_kWh": round(total_kwh_month, 6), "updated_at": now_str}
+                        {
+                            "total_kWh": round(total_kwh_week, 6),
+                            "start_date": prev_week_start.strftime("%Y-%m-%d"),
+                            "end_date": prev_week_end.strftime("%Y-%m-%d"),
+                            "updated_at": now_str,
+                        }
                     )
 
-    print(
-        "✅ Aggregation completed (Daily"
-        + (", Weekly" if is_monday else "")
-        + (", Monthly" if is_first_of_month else "")
-        + ")"
-    )
+    if is_first_of_month:
+        prev_month_dt = now_ph - timedelta(days=1)
+        y, m = str(prev_month_dt.year), f"{prev_month_dt.month:02d}"
+        month_prefix = f"{y}-{m}"
+
+        for user_id, devices in (usage_root or {}).items():
+            for device_id, appliances in (devices or {}).items():
+                for appliance_name in (appliances or {}).keys():
+                    total_kwh_month = 0.0
+                    daily_branch = (
+                        db.reference(
+                            f"/daily_summary/{user_id}/{device_id}/{appliance_name}"
+                        ).get()
+                        or {}
+                    )
+                    for d, summary in daily_branch.items():
+                        if isinstance(d, str) and d.startswith(month_prefix):
+                            total_kwh_month += float(summary.get("total_kWh", 0.0))
+
+                    db.reference(
+                        f"/monthly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}"
+                    ).set(
+                        {
+                            "total_kWh": round(total_kwh_month, 6),
+                            "updated_at": now_str,
+                        }
+                    )
+
+    print("✅ Aggregation completed (Daily + conditional Weekly/Monthly).")
 
 
 def total_energy_consumption():
     now_ph = datetime.now(PH_TZ)
-    today_str = now_ph.strftime("%Y-%m-%d")
-    month_key = now_ph.strftime("%Y-%m")
-
+    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")  # yesterday
     is_monday = now_ph.weekday() == 0
     is_first_of_month = now_ph.day == 1
 
-    def get_week_label(date):
-        start_of_week = date - timedelta(days=date.weekday())
-        end_of_week = start_of_week + timedelta(days=6)
-        week_number = int(start_of_week.strftime("%U"))
-        return f"Week {week_number} ({start_of_week.strftime('%b %d')}–{end_of_week.strftime('%d')})"
+    print("📊 Calculating totals...")
 
-    print("📊 Calculating total energy consumption...")
+    daily_root = db.reference("/daily_summary").get() or {}
+    for user_id, devices in daily_root.items():
+        total_kwh_daily = 0.0
+        for device in (devices or {}).values():
+            for appliance in (device or {}).values():
+                summary = (appliance or {}).get(target_date)
+                if summary:
+                    total_kwh_daily += float(summary.get("total_kWh", 0.0))
 
-    # -- DAILY TOTAL --
-    daily_root = db.reference("/daily_summary").get()
-    if daily_root:
-        for user_id, devices in daily_root.items():
-            total_kwh_daily = sum(
-                summary.get("total_kWh", 0)
-                for device in devices.values()
-                for appliance in device.values()
-                for date, summary in appliance.items()
-                if date == today_str
-            )
-            db.reference(f"/daily_total_consumption/{user_id}/{today_str}").set(
-                {"total_energy_consumption": round(total_kwh_daily, 2)}
-            )
+        db.reference(f"/daily_total_consumption/{user_id}/{target_date}").set(
+            {"total_energy_consumption": round(total_kwh_daily, 2)}
+        )
 
-    # -- WEEKLY TOTAL --
     if is_monday:
-        week_label = get_week_label(now_ph)
-        weekly_root = db.reference("/weekly_summary").get()
-        if weekly_root:
-            for user_id, devices in weekly_root.items():
-                total_kwh_weekly = sum(
-                    summary.get("total_kWh", 0)
-                    for device in devices.values()
-                    for appliance in device.values()
-                    for week, summary in appliance.items()
-                    if week == week_label
-                )
-                db.reference(f"/weekly_total_consumption/{user_id}/{week_label}").set(
-                    {"total_energy_consumption": round(total_kwh_weekly, 2)}
-                )
+        prev_week_end = now_ph - timedelta(days=1)
+        prev_week_start = prev_week_end - timedelta(days=6)
+        y = str(prev_week_start.year)
+        m = f"{prev_week_start.month:02d}"
+        w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
 
-    # -- MONTHLY TOTAL --
+        weekly_root = db.reference("/weekly_summary").get() or {}
+        for user_id, devices in weekly_root.items():
+            user_total = 0.0
+            for device_vals in (devices or {}).values():
+                for appl_vals in (device_vals or {}).values():
+                    bucket = (appl_vals or {}).get(y, {}).get(m, {}).get(w)
+                    if bucket:
+                        user_total += float(bucket.get("total_kWh", 0.0))
+
+            db.reference(f"/weekly_total_consumption/{user_id}/{y}/{m}/{w}").set(
+                {"total_energy_consumption": round(user_total, 2)}
+            )
+
     if is_first_of_month:
-        monthly_root = db.reference("/monthly_summary").get()
-        if monthly_root:
-            for user_id, devices in monthly_root.items():
-                total_kwh_monthly = sum(
-                    summary.get("total_kWh", 0)
-                    for device in devices.values()
-                    for appliance in device.values()
-                    for month, summary in appliance.items()
-                    if month == month_key
-                )
-                db.reference(f"/monthly_total_consumption/{user_id}/{month_key}").set(
-                    {"total_energy_consumption": round(total_kwh_monthly, 2)}
-                )
+        prev_month_dt = now_ph - timedelta(days=1)
+        y, m = str(prev_month_dt.year), f"{prev_month_dt.month:02d}"
 
-    print(
-        "✅ Total energy consumption updated (Daily"
-        + (", Weekly" if is_monday else "")
-        + (", Monthly" if is_first_of_month else "")
-        + ")"
-    )
+        monthly_root = db.reference("/monthly_summary").get() or {}
+        for user_id, devices in monthly_root.items():
+            user_total = 0.0
+            for device_vals in (devices or {}).values():
+                for appl_vals in (device_vals or {}).values():
+                    bucket = (appl_vals or {}).get(y, {}).get(m)
+                    if bucket:
+                        user_total += float(bucket.get("total_kWh", 0.0))
+
+            db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").set(
+                {"total_energy_consumption": round(user_total, 2)}
+            )
+
+    print("✅ Totals updated (Daily + conditional Weekly/Monthly).")
 
 
 scheduler = BackgroundScheduler()
@@ -208,3 +210,187 @@ def status():
         "server_time": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "scheduler": "active",
     }
+
+
+# @app.get("/generate-summaries")
+# def generate_summaries():
+#     print("📊 Backfill: replaying summary_aggregation() from 2025-06-01 to today…")
+
+#     interval_seconds = 5
+
+#     start_date = PH_TZ.localize(datetime(2025, 6, 1)).replace(
+#         hour=0, minute=0, second=0, microsecond=0
+#     )
+#     end_date = datetime.now(PH_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+
+#     usage_root = db.reference("/usage").get()
+#     if not usage_root:
+#         return {"error": "No /usage data found."}
+
+#     run_dt = start_date
+#     while run_dt <= end_date:
+#         now_ph = run_dt
+#         # now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
+#         summaries_at = now_ph.replace(
+#             hour=0, minute=5, second=0, microsecond=0
+#         ).strftime("%Y-%m-%d %H:%M:%S")
+#         totals_at = now_ph.replace(hour=0, minute=10, second=0, microsecond=0).strftime(
+#             "%Y-%m-%d %H:%M:%S"
+#         )
+
+#         # Your main computes daily for yesterday
+#         target_dt = now_ph - timedelta(days=1)
+#         target_date = target_dt.strftime("%Y-%m-%d")
+
+#         is_monday = now_ph.weekday() == 0
+#         is_first_of_month = now_ph.day == 1
+
+#         print(
+#             f"📆 Run day: {now_ph.date()} | Daily target: {target_date} | "
+#             f"{'Mon ' if is_monday else ''}{'1st-of-month' if is_first_of_month else ''}"
+#         )
+
+#         # ------------------ DAILY ------------------
+#         for user_id, devices in (usage_root or {}).items():
+#             user_kwh = 0.0
+
+#             for device_id, appliances in (devices or {}).items():
+#                 for appliance_name, dates in (appliances or {}).items():
+#                     day_data = (dates or {}).get(target_date)
+#                     if not day_data:
+#                         continue
+
+#                     powers = [float(r.get("power", 0)) for r in day_data.values()]
+#                     if not powers:
+#                         continue
+
+#                     total_kwh = sum(
+#                         (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
+#                     )
+#                     avg_power = sum(powers) / len(powers)
+#                     max_power = max(powers)
+
+#                     db.reference(
+#                         f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
+#                     ).set(
+#                         {
+#                             "total_kWh": round(total_kwh, 6),
+#                             "avg_power": round(avg_power, 2),
+#                             "max_power": round(max_power, 2),
+#                             "updated_at": summaries_at,
+#                         }
+#                     )
+
+#                     user_kwh += total_kwh
+
+#             db.reference(f"/daily_total_consumption/{user_id}/{target_date}").set(
+#                 {
+#                     "total_energy_consumption": round(user_kwh, 2),
+#                     "updated_at": totals_at,
+#                 }
+#             )
+
+#             # ------------------ WEEKLY (previous Mon–Sun; EXCLUDES current Monday) ------------------
+#         # ------------------ WEEKLY (previous Mon–Sun; Monday-owned bucket) ------------------
+#         if is_monday:
+#             prev_week_end = now_ph - timedelta(days=1)  # Sunday (yesterday)
+#             prev_week_start = prev_week_end - timedelta(days=6)  # Monday of last week
+
+#             # bucket from the Monday
+#             y = str(prev_week_start.year)
+#             m = f"{prev_week_start.month:02d}"
+#             w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"  # '01'..'05'
+
+#             days = [
+#                 (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d")
+#                 for i in range(7)
+#             ]
+
+#             weekly_user_totals = {}
+
+#             for user_id, devices in (usage_root or {}).items():
+#                 user_week_total = 0.0
+
+#                 for device_id, appliances in (devices or {}).items():
+#                     for appliance_name in (appliances or {}).keys():
+#                         total_kwh_week = 0.0
+#                         for d in days:
+#                             summary = db.reference(
+#                                 f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
+#                             ).get()
+#                             if summary:
+#                                 total_kwh_week += float(summary.get("total_kWh", 0.0))
+
+#                         # /weekly_summary/{user}/{device}/{appliance}/{YYYY}/{MM}/{WW}
+#                         db.reference(
+#                             f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+#                         ).set(
+#                             {
+#                                 "total_kWh": round(total_kwh_week, 6),
+#                                 "start_date": prev_week_start.strftime("%Y-%m-%d"),
+#                                 "end_date": prev_week_end.strftime("%Y-%m-%d"),
+#                                 "updated_at": summaries_at,
+#                             }
+#                         )
+
+#                         user_week_total += total_kwh_week
+
+#                 weekly_user_totals[user_id] = (
+#                     weekly_user_totals.get(user_id, 0.0) + user_week_total
+#                 )
+
+#             # /weekly_total_consumption/{user}/{YYYY}/{MM}/{WW}
+#             for user_id, tot in weekly_user_totals.items():
+#                 db.reference(f"/weekly_total_consumption/{user_id}/{y}/{m}/{w}").set(
+#                     {"total_energy_consumption": round(tot, 2), "updated_at": totals_at}
+#                 )
+
+#         # ------------------ MONTHLY (previous month; reads from daily_summary) ------------------
+#         if is_first_of_month:
+#             prev_month_dt = now_ph - timedelta(days=1)  # last day of previous month
+#             y, m = str(prev_month_dt.year), f"{prev_month_dt.month:02d}"
+#             month_prefix = f"{y}-{m}"
+
+#             monthly_user_totals = {}
+
+#             for user_id, devices in (usage_root or {}).items():
+#                 user_month_total = 0.0
+
+#                 for device_id, appliances in (devices or {}).items():
+#                     for appliance_name in (appliances or {}).keys():
+#                         total_kwh_month = 0.0
+
+#                         daily_branch = (
+#                             db.reference(
+#                                 f"/daily_summary/{user_id}/{device_id}/{appliance_name}"
+#                             ).get()
+#                             or {}
+#                         )
+#                         for d, summary in daily_branch.items():
+#                             if isinstance(d, str) and d.startswith(month_prefix):
+#                                 total_kwh_month += float(summary.get("total_kWh", 0.0))
+
+#                         # /monthly_summary/{user}/{device}/{appliance}/{YYYY}/{MM}
+#                         db.reference(
+#                             f"/monthly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}"
+#                         ).set(
+#                             {
+#                                 "total_kWh": round(total_kwh_month, 6),
+#                                 "updated_at": summaries_at,
+#                             }
+#                         )
+
+#                         user_month_total += total_kwh_month
+
+#                 monthly_user_totals[user_id] = user_month_total
+
+#             # /monthly_total_consumption/{user}/{YYYY}/{MM}
+#             for user_id, tot in monthly_user_totals.items():
+#                 db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").set(
+#                     {"total_energy_consumption": round(tot, 2), "updated_at": totals_at}
+#                 )
+
+#         run_dt += timedelta(days=1)
+
+#     print("✅ Backfill done: daily + (prev week) weekly + (prev month) monthly.")
+#     return {"message": "Backfill complete using summary_aggregation() logic."}
