@@ -1,8 +1,10 @@
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
 from firebase_admin import credentials, db, initialize_app
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from pytz import timezone
+import pandas as pd
+from prophet import Prophet
 
 app = FastAPI()
 
@@ -15,7 +17,6 @@ initialize_app(
         "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
     },
 )
-
 
 def summary_aggregation():
     now_ph = datetime.now(PH_TZ)
@@ -158,7 +159,7 @@ def total_energy_consumption():
             or 0
         )
 
-        db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").set(
+        db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").update(
             {
                 "total_energy_consumption": round(monthly_total + total_kwh_daily, 2),
                 "updated_at": now_str,
@@ -194,6 +195,39 @@ scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
 scheduler.start()
 
+def appliance_daily_prediction(user_id, device_id, appliance_name):
+    MIN_DAYS = 7
+    daily_ref = db.reference(f"/daily_summary/{user_id}/{device_id}/{appliance_name}")
+    daily_data = daily_ref.get()
+
+
+    if not daily_data or len(daily_data) < MIN_DAYS:
+        print("❌ Not enough data.")
+        return None
+    
+    sorted_dates = sorted(daily_data.keys())
+    rows = [
+        {"ds": d, "y": float(daily_data[d].get("total_kWh", 0))}
+        for d in sorted_dates
+        if daily_data[d].get("total_kWh", 0) > 0
+    ]
+    if len(rows) < MIN_DAYS:
+        print("❌ Not enough valid (non-zero) data.")
+        return None
+    
+    df = pd.DataFrame(rows)
+    
+    model = Prophet(daily_seasonality=True)
+    model.fit(df)
+    
+    future = model.make_future_dataframe(periods=1)
+    forecast = model.predict(future)
+    
+    prediction = forecast.iloc[-1]
+    predicted_kwh = round(prediction['yhat'], 2)
+    
+    print(f"Predicted kwh for tomorrow: {predicted_kwh}")
+    return predicted_kwh
 
 @app.get("/")
 def root():
@@ -206,7 +240,6 @@ def ping(request: Request):
         return Response(status_code=200)
     return {"message": "pong"}
 
-
 @app.get("/status")
 def status():
     return {
@@ -215,7 +248,15 @@ def status():
         "scheduler": "active",
     }
 
-
+@app.get("/predict/{user_id}/{device_id}/{appliance_name}")
+def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: str):
+    try:
+        result = appliance_daily_prediction(user_id, device_id, appliance_name)
+        if result is None:
+            raise HTTPException(status_code=400, detail="Not enough data for prediction.")
+        return round(result, 2)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # @app.get("/generate-summaries")
 # def generate_summaries():
 #     print("📊 Backfill: replaying summary_aggregation() from 2025-06-01 to today…")
@@ -277,7 +318,7 @@ def status():
 #                     max_power = max(powers)
 
 #                     db.reference(
-#                         f"/daily_summary/{user_id}/{device_id}/{"Fridge"}/{target_date}"
+#                         f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
 #                     ).set(
 #                         {
 #                             "total_kWh": round(total_kwh, 6),
@@ -301,7 +342,7 @@ def status():
 #                 or 0
 #             )
 #             print(f"Monthly Total Consumption: {monthly_total + user_kwh}")
-#             db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").set(
+#             db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").update(
 #                 {
 #                     "total_energy_consumption": round(monthly_total + user_kwh, 2),
 #                     "updated_at": totals_at,
