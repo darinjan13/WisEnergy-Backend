@@ -1,13 +1,21 @@
+import os
+import smtplib
+import random
+import pandas as pd
+from dotenv import load_dotenv
+from pydantic import BaseModel, EmailStr
 from fastapi import FastAPI, Request, Response, HTTPException
-from firebase_admin import credentials, db, initialize_app
+from firebase_admin import credentials, db, initialize_app, firestore
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from pytz import timezone
-import pandas as pd
 from prophet import Prophet
+from email.mime.text import MIMEText
 
-app = FastAPI()
+load_dotenv()
 
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 PH_TZ = timezone("Asia/Manila")
 
 cred = credentials.Certificate("serviceAccountKey.json")
@@ -17,6 +25,13 @@ initialize_app(
         "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
     },
 )
+
+fs = firestore.client()
+app = FastAPI()
+
+class OTPRequest(BaseModel):
+    email: EmailStr
+
 
 def summary_aggregation():
     now_ph = datetime.now(PH_TZ)
@@ -229,6 +244,26 @@ def appliance_daily_prediction(user_id, device_id, appliance_name):
     print(f"Predicted kwh for tomorrow: {predicted_kwh}")
     return predicted_kwh
 
+def generate_otp_code():
+    return f"{random.randint(100000, 999999)}"
+
+def send_otp_email(to_email: str, otp: str):
+    subject = "Your WisEnergy Password Reset Code"
+    body = f"Your reset code: {otp}\nIt will expire in 5 minutes"
+    
+    message = MIMEText(body)
+    message["Subject"] = subject
+    message["From"] = EMAIL_ADDRESS
+    message["To"] = to_email
+    
+    try:
+        with smtplib.SMTP("smtp.gemail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
+
 @app.get("/")
 def root():
     return {"message": "WisEnergy daily summary updater is active."}
@@ -247,6 +282,20 @@ def status():
         "server_time": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "scheduler": "active",
     }
+
+@app.get("/generate-otp")
+def generate_otp(req: OTPRequest):
+    email_id = req.email.replace(".", "_")
+    otp = generate_otp_code()
+    expires = datetime.utcnow() + timedelta(minutes=5)
+    fs.collection("otp-verification").document(email_id).set({
+        "otp": otp,
+        "expires_at": expires.isoformat,
+        "verified": False
+    })
+    
+    send_otp_email(req.email, otp)
+    return {"message": f"OTP sent to {req.email}"}
 
 @app.get("/predict/{user_id}/{device_id}/{appliance_name}")
 def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: str):
