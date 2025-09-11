@@ -29,6 +29,7 @@ initialize_app(
 fs = firestore.client()
 app = FastAPI()
 
+
 class OTPRequest(BaseModel):
     email: EmailStr
 
@@ -210,16 +211,16 @@ scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
 scheduler.start()
 
+
 def appliance_daily_prediction(user_id, device_id, appliance_name):
     MIN_DAYS = 7
     daily_ref = db.reference(f"/daily_summary/{user_id}/{device_id}/{appliance_name}")
     daily_data = daily_ref.get()
 
-
     if not daily_data or len(daily_data) < MIN_DAYS:
         print("❌ Not enough data.")
         return None
-    
+
     sorted_dates = sorted(daily_data.keys())
     rows = [
         {"ds": d, "y": float(daily_data[d].get("total_kWh", 0))}
@@ -229,40 +230,43 @@ def appliance_daily_prediction(user_id, device_id, appliance_name):
     if len(rows) < MIN_DAYS:
         print("❌ Not enough valid (non-zero) data.")
         return None
-    
+
     df = pd.DataFrame(rows)
-    
+
     model = Prophet(daily_seasonality=True)
     model.fit(df)
-    
+
     future = model.make_future_dataframe(periods=1)
     forecast = model.predict(future)
-    
+
     prediction = forecast.iloc[-1]
-    predicted_kwh = round(prediction['yhat'], 2)
-    
+    predicted_kwh = round(prediction["yhat"], 2)
+
     print(f"Predicted kwh for tomorrow: {predicted_kwh}")
     return predicted_kwh
 
+
 def generate_otp_code():
-    return f"{random.randint(100000, 999999)}"
+    return f"{random.randint(10000, 99999)}"
+
 
 def send_otp_email(to_email: str, otp: str):
     subject = "Your WisEnergy Password Reset Code"
     body = f"Your reset code: {otp}\nIt will expire in 5 minutes"
-    
+
     message = MIMEText(body)
     message["Subject"] = subject
     message["From"] = EMAIL_ADDRESS
     message["To"] = to_email
-    
+
     try:
-        with smtplib.SMTP("smtp.gemail.com", 587) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             server.send_message(message)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
+
 
 @app.get("/")
 def root():
@@ -275,6 +279,7 @@ def ping(request: Request):
         return Response(status_code=200)
     return {"message": "pong"}
 
+
 @app.get("/status")
 def status():
     return {
@@ -283,29 +288,33 @@ def status():
         "scheduler": "active",
     }
 
-@app.get("/generate-otp")
+
+@app.post("/generate-otp")
 def generate_otp(req: OTPRequest):
     email_id = req.email.replace(".", "_")
     otp = generate_otp_code()
     expires = datetime.utcnow() + timedelta(minutes=5)
-    fs.collection("otp-verification").document(email_id).set({
-        "otp": otp,
-        "expires_at": expires.isoformat,
-        "verified": False
-    })
-    
+    fs.collection("otp-verification").document(email_id).set(
+        {"otp": otp, "expires_at": expires.isoformat(), "verified": False}
+    )
+
     send_otp_email(req.email, otp)
     return {"message": f"OTP sent to {req.email}"}
+
 
 @app.get("/predict/{user_id}/{device_id}/{appliance_name}")
 def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: str):
     try:
         result = appliance_daily_prediction(user_id, device_id, appliance_name)
         if result is None:
-            raise HTTPException(status_code=400, detail="Not enough data for prediction.")
+            raise HTTPException(
+                status_code=400, detail="Not enough data for prediction."
+            )
         return round(result, 2)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 # @app.get("/generate-summaries")
 # def generate_summaries():
 #     print("📊 Backfill: replaying summary_aggregation() from 2025-06-01 to today…")
