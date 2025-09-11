@@ -5,7 +5,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr
 from fastapi import FastAPI, Request, Response, HTTPException
-from firebase_admin import credentials, db, initialize_app, firestore
+from firebase_admin import credentials, db, initialize_app, firestore, auth
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from pytz import timezone
@@ -32,6 +32,11 @@ app = FastAPI()
 
 class OTPRequest(BaseModel):
     email: EmailStr
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+    new_password: str
 
 
 def summary_aggregation():
@@ -289,16 +294,32 @@ def status():
     }
 
 
+@app.post("/reset-password")
+def reset_password(data: PasswordResetRequest):
+    try:
+        user = auth.get_user_by_email(data.email)
+        auth.update_user(user.uid, password=data.new_password)
+        return {"message": "Password updated Successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/generate-otp")
 def generate_otp(req: OTPRequest):
+    try:
+        auth.get_user_by_email(req.email)
+    except auth.UserNotFoundError:
+        raise HTTPException(
+            status_code=500, detail=f"{req.email} is not yet registered."
+        )
     email_id = req.email.replace(".", "_")
     otp = generate_otp_code()
     expires = datetime.utcnow() + timedelta(minutes=5)
     fs.collection("otp-verification").document(email_id).set(
         {"otp": otp, "expires_at": expires.isoformat(), "verified": False}
     )
-
     send_otp_email(req.email, otp)
+
     return {"message": f"OTP sent to {req.email}"}
 
 
