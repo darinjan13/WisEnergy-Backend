@@ -3,6 +3,7 @@ import smtplib
 import random
 import pandas as pd
 from dotenv import load_dotenv
+from typing import List
 from pydantic import BaseModel, EmailStr
 from fastapi import FastAPI, Request, Response, HTTPException
 from firebase_admin import credentials, db, initialize_app, firestore, auth
@@ -273,6 +274,20 @@ def send_otp_email(to_email: str, otp: str):
         raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
 
 
+def split_name(full_name: str):
+    if not full_name:
+        return None, None
+
+    parts = full_name.strip().split()
+
+    if len(parts) == 1:
+        return parts[0], ""
+    else:
+        first_name = " ".join(parts[:-1])
+        last_name = parts[-1]
+        return first_name, last_name
+
+
 @app.get("/")
 def root():
     return {"message": "WisEnergy daily summary updater is active."}
@@ -292,6 +307,38 @@ def status():
         "server_time": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "scheduler": "active",
     }
+
+
+@app.get("/devices")
+def get_devices():
+    devices_ref = db.reference("/devices")
+    devices_data = devices_ref.get()
+    if not devices_data:
+        return []
+    return list(devices_data.keys())
+
+
+@app.get("/users", response_model=List[dict])
+def get_all_users():
+    users = []
+    page = auth.list_users()
+    while page:
+        for user in page.users:
+            if user.email and user.email.endswith("@gmail.com"):
+                first_name, last_name = split_name(user.display_name)
+                users.append(
+                    {
+                        "uid": user.uid,
+                        "email": user.email,
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "password": user.password_hash,
+                        "last_sign_in": user.user_metadata.last_sign_in_timestamp,
+                        "created_at": user.user_metadata.creation_timestamp,
+                    }
+                )
+        page = page.get_next_page()
+    return users
 
 
 @app.post("/reset-password")
