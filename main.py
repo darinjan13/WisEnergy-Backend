@@ -3,6 +3,8 @@ import smtplib
 import random
 import pandas as pd
 
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 from dotenv import load_dotenv
 from typing import List
 from pydantic import BaseModel, EmailStr
@@ -18,6 +20,7 @@ load_dotenv()
 
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 PH_TZ = timezone("Asia/Manila")
 
 cred = credentials.Certificate("serviceAccountKey.json")
@@ -374,20 +377,24 @@ def generate_otp_code():
 
 
 def send_otp_email(to_email: str, otp: str):
-    print(EMAIL_ADDRESS)
     subject = "Your WisEnergy Password Reset Code"
     body = f"Your reset code: {otp}\nIt will expire in 5 minutes"
 
-    message = MIMEText(body)
-    message["Subject"] = subject
-    message["From"] = EMAIL_ADDRESS
-    message["To"] = to_email
+    message = Mail(
+        from_email=EMAIL_ADDRESS,
+        to_emails=to_email,
+        subject=subject,
+        plain_text_content=body,
+    )
+
+    # message = MIMEText(body)
+    # message["Subject"] = subject
+    # message["From"] = EMAIL_ADDRESS
+    # message["To"] = to_email
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            server.send_message(message)
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        sg.send(message)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
 

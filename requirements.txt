@@ -11,3 +11,4 @@ requests==2.31.0
 pydantic[email]
 secure-smtplib
 numpy==1.26.4
+sendgrid
