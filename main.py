@@ -2,10 +2,11 @@ import os
 import smtplib
 import random
 import pandas as pd
+
 from dotenv import load_dotenv
 from typing import List
 from pydantic import BaseModel, EmailStr
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Query
 from firebase_admin import credentials, db, initialize_app, firestore, auth
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
@@ -38,6 +39,70 @@ class OTPRequest(BaseModel):
 class PasswordResetRequest(BaseModel):
     email: str
     new_password: str
+
+
+def hourly_summary_update():
+    now_ph = datetime.now(PH_TZ)
+    today = now_ph.strftime("%Y-%m-%d")
+    hour_key = now_ph.strftime("%H:00")
+    interval_seconds = 5
+
+    print(f"📊 Running hourly summary update for {today} {hour_key}...")
+
+    usage_root = db.reference("/usage").get()
+    if not usage_root:
+        print("⚠️ No usage data.")
+        return
+
+    for user_id, devices in (usage_root or {}).items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name, dates in (appliances or {}).items():
+                day_data = (dates or {}).get(today)
+                if not day_data:
+                    continue
+
+                powers = []
+                for ts, rec in (day_data or {}).items():
+                    try:
+                        ts_dt = datetime.strptime(ts, "%H_%M_%S")
+                        if ts_dt.hour == now_ph.hour:
+                            powers.append(float(rec.get("power", 0)))
+                    except:
+                        continue
+
+                if not powers:
+                    continue
+
+                total_kwh_hour = sum(
+                    (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
+                )
+                avg_power_hour = sum(powers) / len(powers)
+                max_power_hour = max(powers)
+
+                daily_ref = db.reference(
+                    f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{today}"
+                )
+                existing = daily_ref.get() or {}
+
+                prev_total = float(existing.get("total_kWh", 0.0))
+                new_total = prev_total + total_kwh_hour
+
+                daily_ref.update(
+                    {
+                        "total_kWh": round(new_total, 6),
+                        "avg_power": round(avg_power_hour, 2),
+                        "max_power": max(
+                            float(existing.get("max_power", 0)), max_power_hour
+                        ),
+                        f"hourly/{hour_key}": round(total_kwh_hour, 6),
+                        "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+                print(
+                    f"{user_id}/{device_id}/{appliance_name}/{today}/{total_kwh_hour}"
+                )
+
+    print("✅ Hourly summary update completed.")
 
 
 def summary_aggregation():
@@ -75,7 +140,7 @@ def summary_aggregation():
 
                 db.reference(
                     f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
-                ).set(
+                ).update(
                     {
                         "total_kWh": round(total_kwh, 6),
                         "avg_power": round(avg_power, 2),
@@ -212,9 +277,61 @@ def total_energy_consumption():
     print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")
 
 
+def generate_recommendations(user_id: str = None):
+    now_ph = datetime.now(PH_TZ)
+    today = now_ph.strftime("%Y-%m-%d")
+    last_hour_key = (now_ph - timedelta(hours=1)).strftime("%H:00")
+
+    print(f"🤖 Generating recommendations for {today} {last_hour_key}...")
+
+    if user_id:
+        # Limit reads to one user only
+        user_root = db.reference(f"/daily_summary/{user_id}").get() or {}
+        daily_root = {user_id: user_root}
+    else:
+        daily_root = db.reference("/daily_summary").get() or {}
+
+    recommendations = {}
+
+    for uid, devices in (daily_root or {}).items():
+        tips = []
+
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name, days in (appliances or {}).items():
+                summary = days.get(today)
+                if not summary:
+                    continue
+
+                hourly = (summary or {}).get("hourly", {})
+                last_hour_kwh = float(hourly.get(last_hour_key, 0))
+
+                if last_hour_kwh and last_hour_kwh > 0.5:  # example threshold
+                    tips.append(
+                        f"⚡ {appliance_name} consumed {last_hour_kwh:.2f} kWh in the last hour."
+                    )
+
+                total_kwh = float(summary.get("total_kWh", 0))
+                if total_kwh > 5:  # another rule
+                    tips.append(
+                        f"📊 Your total usage today reached {total_kwh:.2f} kWh already."
+                    )
+
+        if tips:
+            recommendations[uid] = {
+                "tips": tips,
+                "generated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": today,
+                "hour": last_hour_key,
+            }
+
+    print("✅ Recommendations generated.")
+    return recommendations
+
+
 scheduler = BackgroundScheduler()
 scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
+scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
 scheduler.start()
 
 
@@ -257,6 +374,7 @@ def generate_otp_code():
 
 
 def send_otp_email(to_email: str, otp: str):
+    print(EMAIL_ADDRESS)
     subject = "Your WisEnergy Password Reset Code"
     body = f"Your reset code: {otp}\nIt will expire in 5 minutes"
 
@@ -309,6 +427,17 @@ def status():
     }
 
 
+@app.get("/generate-reccomendations")
+def recommendations(user_id: str = Query(None)):
+    """
+    Generate recommendations.
+    - If user_id provided: only process that user.
+    - Else: process all users.
+    """
+    recs = generate_recommendations(user_id=user_id)
+    return {"status": "ok", "recommendations": recs}
+
+
 @app.get("/devices")
 def get_devices():
     devices_ref = db.reference("/devices")
@@ -351,8 +480,14 @@ def reset_password(data: PasswordResetRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/verify-email")
+def verify_email(req: OTPRequest):
+    return
+
+
 @app.post("/generate-otp")
 def generate_otp(req: OTPRequest):
+    print(f"{req.email}")
     try:
         auth.get_user_by_email(req.email)
     except auth.UserNotFoundError:
@@ -381,201 +516,3 @@ def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: st
         return round(result, 2)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# @app.get("/generate-summaries")
-# def generate_summaries():
-#     print("📊 Backfill: replaying summary_aggregation() from 2025-06-01 to today…")
-
-#     interval_seconds = 5
-
-#     start_date = PH_TZ.localize(datetime(2025, 8, 1)).replace(
-#         hour=0, minute=0, second=0, microsecond=0
-#     )
-#     end_date = datetime.now(PH_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-
-#     usage_root = db.reference("/usage").get()
-#     if not usage_root:
-#         return {"error": "No /usage data found."}
-
-#     run_dt = start_date
-#     while run_dt <= end_date:
-#         now_ph = run_dt
-#         summaries_at = now_ph.replace(
-#             hour=0, minute=5, second=0, microsecond=0
-#         ).strftime("%Y-%m-%d %H:%M:%S")
-#         totals_at = now_ph.replace(hour=0, minute=10, second=0, microsecond=0).strftime(
-#             "%Y-%m-%d %H:%M:%S"
-#         )
-
-#         # Your main computes daily for yesterday
-#         target_dt = now_ph - timedelta(days=1)
-#         target_date = target_dt.strftime("%Y-%m-%d")
-
-#         is_monday = now_ph.weekday() == 0
-#         is_first_of_month = now_ph.day == 1
-#         y = str((now_ph - timedelta(days=1)).year)
-#         m = f"{(now_ph - timedelta(days=1)).month:02d}"
-#         w = f"{(((now_ph - timedelta(days=1)).day - 1) // 7) + 1:02d}"  # '01'..'05'
-
-#         print(
-#             f"📆 Run day: {now_ph.date()} | Daily target: {target_date} | "
-#             f"{'Mon ' if is_monday else ''}{'1st-of-month' if is_first_of_month else ''}"
-#         )
-
-#         # ------------------ DAILY ------------------
-#         for user_id, devices in (usage_root or {}).items():
-#             user_kwh = 0.0
-
-#             for device_id, appliances in (devices or {}).items():
-#                 for appliance_name, dates in (appliances or {}).items():
-#                     day_data = (dates or {}).get(target_date)
-#                     if not day_data:
-#                         continue
-
-#                     powers = [float(r.get("power", 0)) for r in day_data.values()]
-#                     if not powers:
-#                         continue
-
-#                     total_kwh = sum(
-#                         (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
-#                     )
-#                     avg_power = sum(powers) / len(powers)
-#                     max_power = max(powers)
-
-#                     db.reference(
-#                         f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
-#                     ).set(
-#                         {
-#                             "total_kWh": round(total_kwh, 6),
-#                             "avg_power": round(avg_power, 2),
-#                             "max_power": round(max_power, 2),
-#                             "updated_at": summaries_at,
-#                         }
-#                     )
-#                     user_kwh += total_kwh
-
-#             db.reference(f"/daily_total_consumption/{user_id}/{target_date}").set(
-#                 {
-#                     "total_energy_consumption": round(user_kwh, 2),
-#                     "updated_at": totals_at,
-#                 }
-#             )
-#             monthly_total = (
-#                 db.reference(
-#                     f"/monthly_total_consumption/{user_id}/{y}/{m}/total_energy_consumption"
-#                 ).get()
-#                 or 0
-#             )
-#             print(f"Monthly Total Consumption: {monthly_total + user_kwh}")
-#             db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").update(
-#                 {
-#                     "total_energy_consumption": round(monthly_total + user_kwh, 2),
-#                     "updated_at": totals_at,
-#                 }
-#             )
-
-#             # ------------------ WEEKLY (previous Mon–Sun; EXCLUDES current Monday) ------------------
-#         # ------------------ WEEKLY (previous Mon–Sun; Monday-owned bucket) ------------------
-#         if is_monday:
-#             prev_week_end = now_ph - timedelta(days=1)  # Sunday (yesterday)
-#             prev_week_start = prev_week_end - timedelta(days=6)  # Monday of last week
-
-#             # bucket from the Monday
-#             y = str(prev_week_start.year)
-#             m = f"{prev_week_start.month:02d}"
-#             w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"  # '01'..'05'
-
-#             days = [
-#                 (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d")
-#                 for i in range(7)
-#             ]
-
-#             weekly_user_totals = {}
-
-#             for user_id, devices in (usage_root or {}).items():
-#                 user_week_total = 0.0
-
-#                 for device_id, appliances in (devices or {}).items():
-#                     for appliance_name in (appliances or {}).keys():
-#                         total_kwh_week = 0.0
-#                         for d in days:
-#                             summary = db.reference(
-#                                 f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
-#                             ).get()
-#                             if summary:
-#                                 total_kwh_week += float(summary.get("total_kWh", 0.0))
-
-#                         # /weekly_summary/{user}/{device}/{appliance}/{YYYY}/{MM}/{WW}
-#                         db.reference(
-#                             f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
-#                         ).set(
-#                             {
-#                                 "total_kWh": round(total_kwh_week, 6),
-#                                 "start_date": prev_week_start.strftime("%Y-%m-%d"),
-#                                 "end_date": prev_week_end.strftime("%Y-%m-%d"),
-#                                 "updated_at": summaries_at,
-#                             }
-#                         )
-
-#                         user_week_total += total_kwh_week
-
-#                 weekly_user_totals[user_id] = (
-#                     weekly_user_totals.get(user_id, 0.0) + user_week_total
-#                 )
-
-#             # /weekly_total_consumption/{user}/{YYYY}/{MM}/{WW}
-#             for user_id, tot in weekly_user_totals.items():
-#                 db.reference(f"/weekly_total_consumption/{user_id}/{y}/{m}/{w}").set(
-#                     {"total_energy_consumption": round(tot, 2), "updated_at": totals_at}
-#                 )
-
-#         # # ------------------ MONTHLY (previous month; reads from daily_summary) ------------------
-#         # if is_first_of_month:
-#         #     prev_month_dt = now_ph - timedelta(days=1)  # last day of previous month
-#         #     y, m = str(prev_month_dt.year), f"{prev_month_dt.month:02d}"
-#         #     month_prefix = f"{y}-{m}"
-
-#         #     monthly_user_totals = {}
-
-#         #     for user_id, devices in (usage_root or {}).items():
-#         #         user_month_total = 0.0
-
-#         #         for device_id, appliances in (devices or {}).items():
-#         #             for appliance_name in (appliances or {}).keys():
-#         #                 total_kwh_month = 0.0
-
-#         #                 daily_branch = (
-#         #                     db.reference(
-#         #                         f"/daily_summary/{user_id}/{device_id}/{appliance_name}"
-#         #                     ).get()
-#         #                     or {}
-#         #                 )
-#         #                 for d, summary in daily_branch.items():
-#         #                     if isinstance(d, str) and d.startswith(month_prefix):
-#         #                         total_kwh_month += float(summary.get("total_kWh", 0.0))
-
-#         #                 # /monthly_summary/{user}/{device}/{appliance}/{YYYY}/{MM}
-#         #                 db.reference(
-#         #                     f"/monthly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}"
-#         #                 ).set(
-#         #                     {
-#         #                         "total_kWh": round(total_kwh_month, 6),
-#         #                         "updated_at": summaries_at,
-#         #                     }
-#         #                 )
-
-#         #                 user_month_total += total_kwh_month
-
-#         #         monthly_user_totals[user_id] = user_month_total
-
-#         #     # /monthly_total_consumption/{user}/{YYYY}/{MM}
-#         #     for user_id, tot in monthly_user_totals.items():
-#         #         db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").set(
-#         #             {"total_energy_consumption": round(tot, 2), "updated_at": totals_at}
-#         #         )
-
-#         run_dt += timedelta(days=1)
-
-#     print("✅ Backfill done: daily + (prev week) weekly + (prev month) monthly.")
-#     return {"message": "Backfill complete using summary_aggregation() logic."}
