@@ -111,7 +111,7 @@ def hourly_summary_update():
 def summary_aggregation():
     now_ph = datetime.now(PH_TZ)
     now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
-    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")  # yesterday
+    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")
     interval_seconds = 5
 
     is_monday = now_ph.weekday() == 0
@@ -218,7 +218,7 @@ def summary_aggregation():
 def total_energy_consumption():
     now_ph = datetime.now(PH_TZ)
     now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
-    target_dt = now_ph - timedelta(days=1)  # yesterday
+    target_dt = now_ph - timedelta(days=1)
     target_date = target_dt.strftime("%Y-%m-%d")
     is_monday = now_ph.weekday() == 0
     y = str((now_ph - timedelta(days=1)).year)
@@ -226,7 +226,6 @@ def total_energy_consumption():
 
     print("📊 Calculating totals...")
 
-    # ---- DAILY TOTAL (for yesterday) ----
     daily_root = db.reference("/daily_summary").get() or {}
     for user_id, devices in daily_root.items():
         total_kwh_daily = 0.0
@@ -387,11 +386,6 @@ def send_otp_email(to_email: str, otp: str):
         plain_text_content=body,
     )
 
-    # message = MIMEText(body)
-    # message["Subject"] = subject
-    # message["From"] = EMAIL_ADDRESS
-    # message["To"] = to_email
-
     try:
         sg = SendGridAPIClient(SENDGRID_API_KEY)
         sg.send(message)
@@ -512,14 +506,263 @@ def generate_otp(req: OTPRequest):
     return {"message": f"OTP sent to {req.email}"}
 
 
-@app.get("/predict/{user_id}/{device_id}/{appliance_name}")
-def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: str):
+# @app.get("/predict/{user_id}/{device_id}/{appliance_name}")
+# def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: str):
+#     try:
+#         today = datetime.now().date().strftime("%Y-%m-%d")
+#         ref = db.reference(
+#             f"/predictions/{user_id}/{device_id}/{appliance_name}/{today}"
+#         )
+#         existing = ref.get()
+#         if existing:
+#             return {"date": today, **existing, "source": "cached"}
+#         result = appliance_daily_prediction(user_id, device_id, appliance_name)
+#         if result is None:
+#             raise HTTPException(
+#                 status_code=400, detail="Not enough data for prediction."
+#             )
+#         predicted_kwh = round(result, 2)
+#         payload = {
+#             "predicted_kWh": predicted_kwh,
+#             "timestamp": datetime.now().isoformat(),
+#         }
+#         ref.set(payload)
+#         return {"date": today, **payload, "source": "new"}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+import json
+
+def parse_time_key(date_str, time_str):
+    """Convert 'YYYY-MM-DD', 'HH_MM_SS' to datetime"""
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H_%M_%S")
+
+
+def compute_daily_summary(date, readings):
+    if not readings:
+        return None
+
+    # Sort readings by time
+    readings.sort(key=lambda x: x[0])
+
+    powers = [p for _, p in readings]
+    avg_power = sum(powers) / len(powers)
+    max_power = max(powers)
+
+    total_kWh = 0.0
+    hourly = {}
+
+    for i in range(len(readings) - 1):
+        t1, p1 = readings[i]
+        t2, _ = readings[i + 1]
+
+        interval_sec = (t2 - t1).total_seconds()
+        interval_hr = interval_sec / 3600
+
+        kWh = (p1 * interval_hr) / 1000
+        total_kWh += kWh
+
+        hour_key = t1.strftime("%H:00")
+        hourly[hour_key] = hourly.get(hour_key, 0) + kWh
+
+    updated_at = readings[-1][0].strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "avg_power": round(avg_power, 2),
+        "hourly": {h: round(v, 6) for h, v in hourly.items()},
+        "max_power": round(max_power, 2),
+        "total_kWh": round(total_kWh, 5),
+        "updated_at": updated_at,
+    }
+
+
+@app.get("/process-fan")
+def process_fan():
     try:
-        result = appliance_daily_prediction(user_id, device_id, appliance_name)
-        if result is None:
-            raise HTTPException(
-                status_code=400, detail="Not enough data for prediction."
+        with open("fan_august_usage_full.json") as f:  # your merged Aug+Sept file
+            raw_data = json.load(f)
+
+        processed = {}
+
+        for date, times in raw_data.items():
+            readings = []
+            for time_str, record in times.items():
+                if "power" not in record:
+                    continue
+                t = parse_time_key(date, time_str)
+                readings.append((t, record["power"]))
+
+            daily_summary = compute_daily_summary(date, readings)
+            if daily_summary:
+                processed[date] = daily_summary
+
+        # Save processed results
+        with open("fan_usage_processed.json", "w") as f:
+            json.dump(processed, f, indent=2)
+
+        return {
+            "status": "success",
+            "message": "Processed data saved as fan_usage_processed.json",
+            "days_processed": len(processed),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/predict/{user_id}/{device_id}/{appliance_name}")
+def predict_and_return_history(user_id: str, device_id: str, appliance_name: str):
+    try:
+        today = datetime.now().date().strftime("%Y-%m-%d")
+
+        ref = db.reference(
+            f"/predictions/{user_id}/{device_id}/{appliance_name}/{today}"
+        )
+        existing = ref.get()
+
+        if not existing:
+            result = appliance_daily_prediction(
+                user_id, device_id, appliance_name, cutoff_date=datetime.now()
             )
-        return round(result, 2)
+            if result is None:
+                raise HTTPException(
+                    status_code=400, detail="Not enough data for prediction."
+                )
+
+            predicted_kwh = round(result, 2)
+            payload = {
+                "predicted_kWh": predicted_kwh,
+                "timestamp": datetime.now().isoformat(),
+                "model": "Prophet",
+                "horizon": "D0",
+            }
+            ref.set(payload)
+
+        pred_ref = db.reference(f"/predictions/{user_id}/{device_id}/{appliance_name}")
+        all_preds = pred_ref.get() or {}
+
+        dates = sorted(all_preds.keys())[-5:]
+        past5 = {d: all_preds[d] for d in dates}
+
+        return {"predictions": past5}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/backfill-predictions/{user_id}/{device_id}/{appliance_name}")
+def backfill_predictions(user_id: str, device_id: str, appliance_name: str):
+    try:
+        start_date = datetime(2025, 9, 8)
+        end_date = datetime(2025, 9, 16)
+
+        backfilled = {}
+        current_date = start_date
+
+        while current_date <= end_date:
+            d_str = current_date.strftime("%Y-%m-%d")
+
+            try:
+                result = appliance_daily_prediction(
+                    user_id, device_id, appliance_name, cutoff_date=current_date
+                )
+
+                if result is not None:
+                    predicted_kwh = round(result, 2)
+                    pred_ref = db.reference(
+                        f"/predictions/{user_id}/{device_id}/{appliance_name}/{d_str}"
+                    )
+                    pred_ref.set(
+                        {
+                            "predicted_kWh": predicted_kwh,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
+                    backfilled[d_str] = predicted_kwh
+                else:
+                    backfilled[d_str] = "not enough data"
+
+            except Exception as e:
+                backfilled[d_str] = f"error: {str(e)}"
+
+            current_date += timedelta(days=1)
+
+        return {"status": "completed", "backfilled": backfilled}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def fetch_daily_usage(user_id: str, device_id: str, appliance_name: str):
+    """
+    Pull daily summaries from Firebase RTDB.
+    Expected path: /daily_summary/{user}/{device}/{appliance}/{YYYY-MM-DD}/total_kWh
+    """
+    usage_ref = db.reference(f"/daily_summary/{user_id}/{device_id}/{appliance_name}")
+    data = usage_ref.get() or {}
+
+    daily_data = []
+    for date_str, record in data.items():
+        try:
+            kwh = record.get("total_kWh", 0)
+            daily_data.append({"date": date_str, "kWh": kwh})
+        except Exception:
+            continue
+
+    # Sort by date
+    daily_data.sort(key=lambda x: x["date"])
+    return daily_data
+
+
+import numpy as np
+
+
+@app.get("/evaluate/{user_id}/{device_id}/{appliance_name}")
+def evaluate_predictions_api(user_id: str, device_id: str, appliance_name: str):
+    try:
+        # Define evaluation range (Sept 8–15 since you have actuals)
+        start_date = datetime(2025, 9, 8)
+        end_date = datetime(2025, 9, 15)
+
+        actuals = fetch_daily_usage(user_id, device_id, appliance_name)
+        actual_dict = {x["date"]: x["kWh"] for x in actuals}
+
+        preds = {}
+        current_date = start_date
+        while current_date <= end_date:
+            d_str = current_date.strftime("%Y-%m-%d")
+            pred = appliance_daily_prediction(
+                user_id, device_id, appliance_name, cutoff_date=current_date
+            )
+            if pred is not None and d_str in actual_dict:
+                preds[d_str] = round(pred, 2)
+            current_date += timedelta(days=1)
+
+        if not preds:
+            raise HTTPException(
+                status_code=400, detail="Not enough predictions to evaluate."
+            )
+
+        # Collect aligned lists
+        y_true = [actual_dict[d] for d in preds.keys()]
+        y_pred = [preds[d] for d in preds.keys()]
+
+        # Metrics
+        mae = float(np.mean(np.abs(np.array(y_true) - np.array(y_pred))))
+        rmse = float(np.sqrt(np.mean((np.array(y_true) - np.array(y_pred)) ** 2)))
+        mape = float(
+            np.mean(np.abs((np.array(y_true) - np.array(y_pred)) / np.array(y_true)))
+            * 100
+        )
+
+        return {
+            "range": f"{start_date.date()} to {end_date.date()}",
+            "predictions": preds,
+            "metrics": {
+                "MAE": round(mae, 3),
+                "RMSE": round(rmse, 3),
+                "MAPE": f"{mape:.2f}%",
+            },
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
