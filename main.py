@@ -331,7 +331,7 @@ def generate_recommendations(user_id: str = None):
 
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
+# scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
 scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
 scheduler.start()
@@ -533,6 +533,7 @@ def generate_otp(req: OTPRequest):
 
 import json
 
+
 def parse_time_key(date_str, time_str):
     """Convert 'YYYY-MM-DD', 'HH_MM_SS' to datetime"""
     return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H_%M_%S")
@@ -644,125 +645,6 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
         past5 = {d: all_preds[d] for d in dates}
 
         return {"predictions": past5}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/backfill-predictions/{user_id}/{device_id}/{appliance_name}")
-def backfill_predictions(user_id: str, device_id: str, appliance_name: str):
-    try:
-        start_date = datetime(2025, 9, 8)
-        end_date = datetime(2025, 9, 16)
-
-        backfilled = {}
-        current_date = start_date
-
-        while current_date <= end_date:
-            d_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                result = appliance_daily_prediction(
-                    user_id, device_id, appliance_name, cutoff_date=current_date
-                )
-
-                if result is not None:
-                    predicted_kwh = round(result, 2)
-                    pred_ref = db.reference(
-                        f"/predictions/{user_id}/{device_id}/{appliance_name}/{d_str}"
-                    )
-                    pred_ref.set(
-                        {
-                            "predicted_kWh": predicted_kwh,
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    )
-                    backfilled[d_str] = predicted_kwh
-                else:
-                    backfilled[d_str] = "not enough data"
-
-            except Exception as e:
-                backfilled[d_str] = f"error: {str(e)}"
-
-            current_date += timedelta(days=1)
-
-        return {"status": "completed", "backfilled": backfilled}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-def fetch_daily_usage(user_id: str, device_id: str, appliance_name: str):
-    """
-    Pull daily summaries from Firebase RTDB.
-    Expected path: /daily_summary/{user}/{device}/{appliance}/{YYYY-MM-DD}/total_kWh
-    """
-    usage_ref = db.reference(f"/daily_summary/{user_id}/{device_id}/{appliance_name}")
-    data = usage_ref.get() or {}
-
-    daily_data = []
-    for date_str, record in data.items():
-        try:
-            kwh = record.get("total_kWh", 0)
-            daily_data.append({"date": date_str, "kWh": kwh})
-        except Exception:
-            continue
-
-    # Sort by date
-    daily_data.sort(key=lambda x: x["date"])
-    return daily_data
-
-
-import numpy as np
-
-
-@app.get("/evaluate/{user_id}/{device_id}/{appliance_name}")
-def evaluate_predictions_api(user_id: str, device_id: str, appliance_name: str):
-    try:
-        # Define evaluation range (Sept 8–15 since you have actuals)
-        start_date = datetime(2025, 9, 8)
-        end_date = datetime(2025, 9, 15)
-
-        actuals = fetch_daily_usage(user_id, device_id, appliance_name)
-        actual_dict = {x["date"]: x["kWh"] for x in actuals}
-
-        preds = {}
-        current_date = start_date
-        while current_date <= end_date:
-            d_str = current_date.strftime("%Y-%m-%d")
-            pred = appliance_daily_prediction(
-                user_id, device_id, appliance_name, cutoff_date=current_date
-            )
-            if pred is not None and d_str in actual_dict:
-                preds[d_str] = round(pred, 2)
-            current_date += timedelta(days=1)
-
-        if not preds:
-            raise HTTPException(
-                status_code=400, detail="Not enough predictions to evaluate."
-            )
-
-        # Collect aligned lists
-        y_true = [actual_dict[d] for d in preds.keys()]
-        y_pred = [preds[d] for d in preds.keys()]
-
-        # Metrics
-        mae = float(np.mean(np.abs(np.array(y_true) - np.array(y_pred))))
-        rmse = float(np.sqrt(np.mean((np.array(y_true) - np.array(y_pred)) ** 2)))
-        mape = float(
-            np.mean(np.abs((np.array(y_true) - np.array(y_pred)) / np.array(y_true)))
-            * 100
-        )
-
-        return {
-            "range": f"{start_date.date()} to {end_date.date()}",
-            "predictions": preds,
-            "metrics": {
-                "MAE": round(mae, 3),
-                "RMSE": round(rmse, 3),
-                "MAPE": f"{mape:.2f}%",
-            },
-        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
