@@ -506,30 +506,43 @@ def generate_otp(req: OTPRequest):
     return {"message": f"OTP sent to {req.email}"}
 
 
-# @app.get("/predict/{user_id}/{device_id}/{appliance_name}")
-# def predict_daily_appliance_kwh(user_id: str, device_id: str, appliance_name: str):
-#     try:
-#         today = datetime.now().date().strftime("%Y-%m-%d")
-#         ref = db.reference(
-#             f"/predictions/{user_id}/{device_id}/{appliance_name}/{today}"
-#         )
-#         existing = ref.get()
-#         if existing:
-#             return {"date": today, **existing, "source": "cached"}
-#         result = appliance_daily_prediction(user_id, device_id, appliance_name)
-#         if result is None:
-#             raise HTTPException(
-#                 status_code=400, detail="Not enough data for prediction."
-#             )
-#         predicted_kwh = round(result, 2)
-#         payload = {
-#             "predicted_kWh": predicted_kwh,
-#             "timestamp": datetime.now().isoformat(),
-#         }
-#         ref.set(payload)
-#         return {"date": today, **payload, "source": "new"}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
+@app.get("/predict/{user_id}/{device_id}/{appliance_name}")
+def predict_and_return_history(user_id: str, device_id: str, appliance_name: str):
+    try:
+        today = datetime.now().date().strftime("%Y-%m-%d")
+
+        ref = db.reference(
+            f"/predictions/{user_id}/{device_id}/{appliance_name}/{today}"
+        )
+        existing = ref.get()
+
+        if not existing:
+            result = appliance_daily_prediction(user_id, device_id, appliance_name)
+            if result is None:
+                raise HTTPException(
+                    status_code=400, detail="Not enough data for prediction."
+                )
+
+            predicted_kwh = round(result, 2)
+            payload = {
+                "predicted_kWh": predicted_kwh,
+                "timestamp": datetime.now().isoformat(),
+                "model": "Prophet",
+                "horizon": "D0",
+            }
+            ref.set(payload)
+
+        pred_ref = db.reference(f"/predictions/{user_id}/{device_id}/{appliance_name}")
+        all_preds = pred_ref.get() or {}
+
+        dates = sorted(all_preds.keys())[-5:]
+        past5 = {d: all_preds[d] for d in dates}
+
+        return {"predictions": past5}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 import json
 
@@ -580,7 +593,7 @@ def compute_daily_summary(date, readings):
 @app.get("/process-fan")
 def process_fan():
     try:
-        with open("fan_august_usage_full.json") as f:  # your merged Aug+Sept file
+        with open("fridge.json") as f:  # your merged Aug+Sept file
             raw_data = json.load(f)
 
         processed = {}
@@ -598,7 +611,7 @@ def process_fan():
                 processed[date] = daily_summary
 
         # Save processed results
-        with open("fan_usage_processed.json", "w") as f:
+        with open("fridge_processed.json", "w") as f:
             json.dump(processed, f, indent=2)
 
         return {
@@ -610,41 +623,87 @@ def process_fan():
         return {"status": "error", "message": str(e)}
 
 
-@app.get("/predict/{user_id}/{device_id}/{appliance_name}")
-def predict_and_return_history(user_id: str, device_id: str, appliance_name: str):
-    try:
-        today = datetime.now().date().strftime("%Y-%m-%d")
+def rolling_backfill_predictions_with_regressors(
+    daily_json: dict, start_date: str, out_file: str = None
+):
+    """
+    Backfills predictions starting from `start_date` using Prophet with regressors.
+    Uses data before each target date as training.
+    Returns dict in Firebase format.
+    """
+    all_dates = sorted(daily_json.keys())
+    start_idx = all_dates.index(start_date)
 
-        ref = db.reference(
-            f"/predictions/{user_id}/{device_id}/{appliance_name}/{today}"
-        )
-        existing = ref.get()
+    results = {}
 
-        if not existing:
-            result = appliance_daily_prediction(
-                user_id, device_id, appliance_name, cutoff_date=datetime.now()
-            )
-            if result is None:
-                raise HTTPException(
-                    status_code=400, detail="Not enough data for prediction."
+    for i in range(start_idx, len(all_dates)):
+        target_date = all_dates[i]
+
+        # training set = all dates before target_date
+        train_dates = all_dates[:i]
+        if len(train_dates) < 2:
+            continue
+
+        records = []
+        for d in train_dates:
+            try:
+                total_kwh = float(daily_json[d].get("total_kWh", 0))
+                avg_power = float(daily_json[d].get("avg_power", 0))
+                max_power = float(daily_json[d].get("max_power", 0))
+
+                records.append(
+                    {
+                        "ds": datetime.strptime(d, "%Y-%m-%d"),
+                        "y": total_kwh,
+                        "avg_power": avg_power,
+                        "max_power": max_power,
+                    }
                 )
+            except Exception:
+                continue
 
-            predicted_kwh = round(result, 2)
-            payload = {
-                "predicted_kWh": predicted_kwh,
-                "timestamp": datetime.now().isoformat(),
-                "model": "Prophet",
-                "horizon": "D0",
+        df = pd.DataFrame(records).sort_values("ds")
+
+        # train Prophet with regressors
+        model = Prophet(daily_seasonality=True, yearly_seasonality=True)
+        model.add_regressor("avg_power")
+        model.add_regressor("max_power")
+        model.fit(df)
+
+        # Prepare future for the target_date
+        target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+        future = pd.DataFrame(
+            {
+                "ds": [target_dt],
+                "avg_power": [daily_json[target_date].get("avg_power", 0)],
+                "max_power": [daily_json[target_date].get("max_power", 0)],
             }
-            ref.set(payload)
+        )
 
-        pred_ref = db.reference(f"/predictions/{user_id}/{device_id}/{appliance_name}")
-        all_preds = pred_ref.get() or {}
+        forecast = model.predict(future).iloc[0]
 
-        dates = sorted(all_preds.keys())[-5:]
-        past5 = {d: all_preds[d] for d in dates}
+        results[target_date] = {
+            "predicted_kWh": round(float(forecast["yhat"]), 2),
+            "timestamp": forecast["ds"].strftime("%Y-%m-%dT%H:%M:%S"),
+        }
 
-        return {"predictions": past5}
+        print(
+            f"✅ Forecasted {target_date}: {results[target_date]['predicted_kWh']} kWh"
+        )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # optional save
+    if out_file:
+        with open(out_file, "w") as f:
+            json.dump(results, f, indent=2)
+
+    return results
+
+
+@app.get("/qwe")
+def backfill_predictions():
+    with open("fan_usage_processed.json", "r") as f:
+        fan_data = json.load(f)
+
+    preds = rolling_backfill_predictions_with_regressors(
+        fan_data, start_date="2025-08-14", out_file="fan_predictions.json"
+    )
