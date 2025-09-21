@@ -23,11 +23,12 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 PH_TZ = timezone("Asia/Manila")
 
-cred = credentials.Certificate("serviceAccountKey.json")
+cred = credentials.Certificate("serviceAccount.json")
 initialize_app(
     cred,
     {
-        "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
+        # "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
+        "databaseURL": "https://wisenergy-11737-default-rtdb.asia-southeast1.firebasedatabase.app/"
     },
 )
 
