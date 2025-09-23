@@ -53,20 +53,30 @@ def hourly_summary_update():
 
     print(f"📊 Running hourly summary update for {today} {hour_key}...")
 
-    usage_root = db.reference("/usage").get()
-    if not usage_root:
+    users = db.reference("/usage").get(shallow=True)
+    if not users:
         print("⚠️ No usage data.")
         return
 
-    for user_id, devices in (usage_root or {}).items():
-        for device_id, appliances in (devices or {}).items():
-            for appliance_name, dates in (appliances or {}).items():
-                day_data = (dates or {}).get(today)
+    for user_id in users:
+        devices = db.reference(f"/usage/{user_id}").get(shallow=True) or {}
+        for device_id in devices:
+            appliances = (
+                db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True) or {}
+            )
+            for appliance_name in appliances:
+                day_data = (
+                    db.reference(
+                        f"/usage/{user_id}/{device_id}/{appliance_name}/{today}"
+                    ).get()
+                    or {}
+                )
+
                 if not day_data:
                     continue
 
                 powers = []
-                for ts, rec in (day_data or {}).items():
+                for ts, rec in day_data.items():
                     try:
                         ts_dt = datetime.strptime(ts, "%H_%M_%S")
                         if ts_dt.hour == now_ph.hour:
@@ -80,7 +90,6 @@ def hourly_summary_update():
                 total_kwh_hour = sum(
                     (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
                 )
-                avg_power_hour = sum(powers) / len(powers)
                 max_power_hour = max(powers)
 
                 daily_ref = db.reference(
@@ -88,23 +97,29 @@ def hourly_summary_update():
                 )
                 existing = daily_ref.get() or {}
 
-                prev_total = float(existing.get("total_kWh", 0.0))
-                new_total = prev_total + total_kwh_hour
+                hourly_ref = daily_ref.child("hourly")
+                hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
+                all_hourly = hourly_ref.get() or {}
+                
+                new_total = sum(all_hourly.values())
+                
+                hourly_data = (existing.get("hourly", {}) or {})
+                total_kwh_so_far = sum(hourly_data.values())
 
+                hours_so_far = len(hourly_data)
+                avg_power_day = (total_kwh_so_far * 1000) / hours_so_far if hours_so_far else 0
                 daily_ref.update(
                     {
                         "total_kWh": round(new_total, 6),
-                        "avg_power": round(avg_power_hour, 2),
+                        "avg_power": round(avg_power_day, 2),
                         "max_power": max(
                             float(existing.get("max_power", 0)), max_power_hour
                         ),
-                        f"hourly/{hour_key}": round(total_kwh_hour, 6),
                         "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
                     }
                 )
-                print(
-                    f"{user_id}/{device_id}/{appliance_name}/{today}/{total_kwh_hour}"
-                )
+
+                print(f"{user_id}/{device_id}/{appliance_name}/{today}/{hour_key} ✅")
 
     print("✅ Hourly summary update completed.")
 
