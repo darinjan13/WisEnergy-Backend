@@ -427,24 +427,34 @@ def get_devices():
 
 @app.get("/users", response_model=List[dict])
 def get_all_users():
-    users = []
+    # Fetch from Realtime Database
+    users_ref = db.reference("/users").get() or {}
+
+    # Fetch from Firebase Auth
+    auth_users = {}
     page = auth.list_users()
     while page:
         for user in page.users:
-            if user.email and user.email.endswith("@gmail.com"):
-                first_name, last_name = split_name(user.display_name)
-                users.append(
-                    {
-                        "uid": user.uid,
-                        "email": user.email,
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "password": user.password_hash,
-                        "last_sign_in": user.user_metadata.last_sign_in_timestamp,
-                        "created_at": user.user_metadata.creation_timestamp,
-                    }
-                )
+            auth_users[user.uid] = {
+                "password": user.password_hash,  # only password from Auth
+            }
         page = page.get_next_page()
+
+    # Merge database and auth data
+    users = []
+    for uid, data in users_ref.items():
+        merged = {
+            "uid": uid,
+            "email": data.get("email"),
+            "first_name": data.get("first_name"),
+            "last_name": data.get("last_name"),
+            "location": data.get("location"),
+            "created_at": data.get("created_at"),
+            "role": data.get("role"),
+            "password": auth_users.get(uid, {}).get("password"),  # only from Auth
+        }
+        users.append(merged)
+
     return users
 
 
