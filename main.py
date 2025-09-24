@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from typing import List
 from pydantic import BaseModel, EmailStr
 from fastapi import FastAPI, Request, Response, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import credentials, db, initialize_app, firestore, auth
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
@@ -34,6 +35,18 @@ initialize_app(
 
 fs = firestore.client()
 app = FastAPI()
+
+origins = [
+    "http://localhost:5173",  # your Vite dev server
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class OTPRequest(BaseModel):
@@ -100,14 +113,16 @@ def hourly_summary_update():
                 hourly_ref = daily_ref.child("hourly")
                 hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
                 all_hourly = hourly_ref.get() or {}
-                
+
                 new_total = sum(all_hourly.values())
-                
-                hourly_data = (existing.get("hourly", {}) or {})
+
+                hourly_data = existing.get("hourly", {}) or {}
                 total_kwh_so_far = sum(hourly_data.values())
 
                 hours_so_far = len(hourly_data)
-                avg_power_day = (total_kwh_so_far * 1000) / hours_so_far if hours_so_far else 0
+                avg_power_day = (
+                    (total_kwh_so_far * 1000) / hours_so_far if hours_so_far else 0
+                )
                 daily_ref.update(
                     {
                         "total_kWh": round(new_total, 6),
@@ -127,108 +142,54 @@ def hourly_summary_update():
 def summary_aggregation():
     now_ph = datetime.now(PH_TZ)
     now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
-    target_date = (now_ph - timedelta(days=1)).strftime("%Y-%m-%d")
-    interval_seconds = 5
 
-    is_monday = now_ph.weekday() == 0
-    is_first_of_month = now_ph.day == 1
-
-    print("📊 Starting summary aggregation...")
-
-    usage_root = db.reference("/usage").get()
-    if not usage_root:
-        print("⚠️ No usage data.")
+    # Only run weekly aggregation on Mondays
+    if now_ph.weekday() != 0:
+        print("⚠️ Not Monday, skipping weekly aggregation.")
         return
 
-    for user_id, devices in (usage_root or {}).items():
+    prev_week_end = now_ph - timedelta(days=1)  # Sunday
+    prev_week_start = prev_week_end - timedelta(days=6)  # Monday
+    y = str(prev_week_start.year)
+    m = f"{prev_week_start.month:02d}"
+    w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
+
+    # Collect all days in last week
+    days = [
+        (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)
+    ]
+
+    print(f"📊 Starting weekly aggregation for {days[0]} → {days[-1]}")
+
+    daily_root = db.reference("/daily_summary").get() or {}
+    for user_id, devices in (daily_root or {}).items():
         for device_id, appliances in (devices or {}).items():
-            for appliance_name, dates in (appliances or {}).items():
-                day_data = (dates or {}).get(target_date)
-                if not day_data:
-                    continue
+            for appliance_name in (appliances or {}).keys():
+                total_kwh_week = 0.0
 
-                powers = [float(rec.get("power", 0)) for rec in day_data.values()]
-                if not powers:
-                    continue
+                # Sum from daily_summary
+                for d in days:
+                    summary = db.reference(
+                        f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
+                    ).get()
+                    if summary:
+                        total_kwh_week += float(summary.get("total_kWh", 0.0))
 
-                total_kwh = sum(
-                    (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
-                )
-                avg_power = sum(powers) / len(powers)
-                max_power = max(powers)
-
+                # Save into weekly_summary
                 db.reference(
-                    f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
-                ).update(
+                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+                ).set(
                     {
-                        "total_kWh": round(total_kwh, 6),
-                        "avg_power": round(avg_power, 2),
-                        "max_power": round(max_power, 2),
+                        "total_kWh": round(total_kwh_week, 6),
+                        "start_date": prev_week_start.strftime("%Y-%m-%d"),
+                        "end_date": prev_week_end.strftime("%Y-%m-%d"),
                         "updated_at": now_str,
                     }
                 )
 
-    if is_monday:
-        prev_week_end = now_ph - timedelta(days=1)
-        prev_week_start = prev_week_end - timedelta(days=6)
-        y = str(prev_week_start.year)
-        m = f"{prev_week_start.month:02d}"
-        w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
-        days = [
-            (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)
-        ]
+                print(f"✅ Weekly summary updated for {appliance_name} ({user_id})")
 
-        for user_id, devices in (usage_root or {}).items():
-            for device_id, appliances in (devices or {}).items():
-                for appliance_name in (appliances or {}).keys():
-                    total_kwh_week = 0.0
-                    for d in days:
-                        summary = db.reference(
-                            f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
-                        ).get()
-                        if summary:
-                            total_kwh_week += float(summary.get("total_kWh", 0.0))
-
-                    db.reference(
-                        f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
-                    ).set(
-                        {
-                            "total_kWh": round(total_kwh_week, 6),
-                            "start_date": prev_week_start.strftime("%Y-%m-%d"),
-                            "end_date": prev_week_end.strftime("%Y-%m-%d"),
-                            "updated_at": now_str,
-                        }
-                    )
-
-    if is_first_of_month:
-        prev_month_dt = now_ph - timedelta(days=1)
-        y, m = str(prev_month_dt.year), f"{prev_month_dt.month:02d}"
-        month_prefix = f"{y}-{m}"
-
-        for user_id, devices in (usage_root or {}).items():
-            for device_id, appliances in (devices or {}).items():
-                for appliance_name in (appliances or {}).keys():
-                    total_kwh_month = 0.0
-                    daily_branch = (
-                        db.reference(
-                            f"/daily_summary/{user_id}/{device_id}/{appliance_name}"
-                        ).get()
-                        or {}
-                    )
-                    for d, summary in daily_branch.items():
-                        if isinstance(d, str) and d.startswith(month_prefix):
-                            total_kwh_month += float(summary.get("total_kWh", 0.0))
-
-                    db.reference(
-                        f"/monthly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}"
-                    ).set(
-                        {
-                            "total_kWh": round(total_kwh_month, 6),
-                            "updated_at": now_str,
-                        }
-                    )
-
-    print("✅ Aggregation completed (Daily + conditional Weekly/Monthly).")
+    print("🎉 Weekly aggregation completed.")
 
 
 def total_energy_consumption():

@@ -234,15 +234,100 @@ def hourly_summary_update():
     print("✅ Hourly summary update completed.")
 
 
+import json
+from datetime import datetime, timedelta
+from firebase_admin import db
+
+
+def backfill_weekly_from_export(input_file: str):
+    """
+    Read an export shaped like:
+      { "<uid>": { "<deviceId>": { "<applianceName>": { "YYYY-MM-DD": {...} } } } }
+    and write weekly_summary for every device/appliance.
+
+    Weekly bucket path (to match your schema):
+      /weekly_summary/{uid}/{deviceId}/{appliance}/{YYYY}/{MM}/{WW}
+      where WW = 01..05 (nth Monday-owned week of that month)
+    """
+
+    with open(input_file, "r") as f:
+        exported = json.load(f)
+
+    for user_id, devices in (exported or {}).items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name, daily_data in (appliances or {}).items():
+                print(f"📊 Processing {user_id}/{device_id}/{appliance_name}")
+
+                if not isinstance(daily_data, dict) or not daily_data:
+                    continue
+
+                # All dates we have for this appliance
+                try:
+                    date_objs = sorted(
+                        datetime.strptime(d, "%Y-%m-%d") for d in daily_data.keys()
+                    )
+                except Exception:
+                    # Skip malformed date keys
+                    continue
+
+                start = date_objs[0]
+                end = date_objs[-1]
+
+                # Align to Monday for the first week to compute
+                current = start - timedelta(days=start.weekday())  # Monday
+                while current <= end:
+                    week_start = current  # Monday
+                    week_end = week_start + timedelta(days=6)  # Sunday
+
+                    y = week_start.strftime("%Y")
+                    m = week_start.strftime("%m")
+                    # "nth week of month" (1–5) using the Monday's day-of-month
+                    w = f"{((week_start.day - 1) // 7) + 1:02d}"
+
+                    # Sum total_kWh for the 7 days in this Monday–Sunday window
+                    total_kwh_week = 0.0
+                    for i in range(7):
+                        d_key = (week_start + timedelta(days=i)).strftime("%Y-%m-%d")
+                        if d_key in daily_data:
+                            try:
+                                total_kwh_week += float(
+                                    daily_data[d_key].get("total_kWh", 0.0)
+                                )
+                            except Exception:
+                                pass
+
+                    if total_kwh_week > 0:
+                        payload = {
+                            "total_kWh": round(total_kwh_week, 6),
+                            "start_date": week_start.strftime("%Y-%m-%d"),
+                            "end_date": week_end.strftime("%Y-%m-%d"),
+                            # 👇 updated_at is the Monday of that bucket at 00:05:00
+                            "updated_at": f"{week_start.strftime('%Y-%m-%d')} 00:05:00",
+                        }
+
+                        ref = db.reference(
+                            f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+                        )
+                        ref.set(payload)
+                        print(
+                            f"✅ {user_id}/{device_id}/{appliance_name} → {y}-{m} W{w}: {payload}"
+                        )
+
+                    current += timedelta(days=7)
+
+    print("🎉 Weekly backfill complete.")
+
+
 if __name__ == "__main__":
     # hourly_summary_update()
-    backfill_single_day_usage(
-        input_file="fan.json",
-        target_date="2025-09-23",
-        user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
-        device_id="d8bc24124b00",
-        appliance_name="Fan",
-    )
+    # backfill_single_day_usage(
+    #     input_file="files/fan_23.json",
+    #     target_date="2025-09-23",
+    #     user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
+    #     device_id="d8bc24124b00",
+    #     appliance_name="Fan",
+    # )
+    backfill_weekly_from_export("files/all_daily_summary.json")
     # backfill_multi_day_usage(
     #     input_file="usage1.json",  # your file with {"2025-08-01": {...}, "2025-08-02": {...}}
     #     user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
