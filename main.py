@@ -422,7 +422,9 @@ def get_devices():
     devices_data = devices_ref.get()
     if not devices_data:
         return []
-    return list(devices_data.keys())
+
+    # Include ID with each device
+    return [{"id": device_id, **details} for device_id, details in devices_data.items()]
 
 
 @app.get("/users", response_model=List[dict])
@@ -456,6 +458,46 @@ def get_all_users():
         users.append(merged)
 
     return users
+
+
+@app.get("/reviews")
+def get_reviews():
+    reviews_ref = db.reference("/reviews")
+    reviews_data = reviews_ref.get()
+    if not reviews_data:
+        return []
+
+    return [{"id": review_id, **details} for review_id, details in reviews_data.items()]
+
+
+@app.get("/reviews/{review_id}")
+def get_review(review_id: str):
+    review_ref = db.reference(f"/reviews/{review_id}")
+    review_data = review_ref.get()
+    if not review_data:
+        return {"error": "Review not found"}
+    return {"id": review_id, **review_data}
+
+
+@app.get("/feedback")
+def get_feedback():
+    feedback_ref = db.reference("/feedback")
+    feedback_data = feedback_ref.get()
+    if not feedback_data:
+        return []
+
+    return [
+        {"id": feedback_id, **details} for feedback_id, details in feedback_data.items()
+    ]
+
+
+@app.get("/feedback/{feedback_id}")
+def get_feedback_item(feedback_id: str):
+    feedback_ref = db.reference(f"/feedback/{feedback_id}")
+    feedback_data = feedback_ref.get()
+    if not feedback_data:
+        return {"error": "Feedback not found"}
+    return {"id": feedback_id, **feedback_data}
 
 
 @app.post("/reset-password")
