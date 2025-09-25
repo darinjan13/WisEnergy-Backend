@@ -318,6 +318,80 @@ def backfill_weekly_from_export(input_file: str):
     print("🎉 Weekly backfill complete.")
 
 
+import pandas as pd
+from prophet import Prophet
+
+
+def backfill_predictions(json_file, min_days=7, output_file="predictions.json"):
+    with open(json_file, "r") as f:
+        data = json.load(f)
+
+    predictions = {}
+
+    for user_id, devices in data.items():
+        predictions[user_id] = {}
+        for device_id, appliances in devices.items():
+            predictions[user_id][device_id] = {}
+
+            for appliance_name, daily_data in appliances.items():
+                sorted_dates = sorted(daily_data.keys())
+                rows = [
+                    {"ds": d, "y": float(daily_data[d].get("total_kWh", 0))}
+                    for d in sorted_dates
+                    if daily_data[d].get("total_kWh", 0) > 0
+                ]
+
+                if len(rows) < min_days:
+                    continue  # not enough data to train
+
+                df = pd.DataFrame(rows)
+                df["ds"] = pd.to_datetime(df["ds"])
+
+                appliance_predictions = {}
+
+                # Sliding window: predict day by day until last actual
+                for i in range(min_days, len(sorted_dates)):
+                    train_dates = sorted_dates[:i]
+                    train_rows = [
+                        {"ds": d, "y": float(daily_data[d].get("total_kWh", 0))}
+                        for d in train_dates
+                        if daily_data[d].get("total_kWh", 0) > 0
+                    ]
+
+                    if len(train_rows) < min_days:
+                        continue
+
+                    train_df = pd.DataFrame(train_rows)
+                    train_df["ds"] = pd.to_datetime(train_df["ds"])
+
+                    model = Prophet(daily_seasonality=True)
+                    model.fit(train_df)
+
+                    next_day = pd.to_datetime(sorted_dates[i]).date()
+
+                    future = pd.DataFrame({"ds": [pd.to_datetime(next_day)]})
+                    forecast = model.predict(future)
+                    pred = forecast.iloc[0]
+
+                    appliance_predictions[next_day.isoformat()] = {
+                        "horizon": "D0",
+                        "model": "Prophet",
+                        "predicted_kWh": round(pred["yhat"], 2),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+
+                predictions[user_id][device_id][appliance_name] = appliance_predictions
+
+    # Save backfill to JSON
+    with open(output_file, "w") as f:
+        json.dump(predictions, f, indent=4)
+
+    print(f"✅ Backfilled predictions exported to {output_file}")
+    return predictions
+
+
+import pprint
+
 if __name__ == "__main__":
     # hourly_summary_update()
     # backfill_single_day_usage(
@@ -327,7 +401,9 @@ if __name__ == "__main__":
     #     device_id="d8bc24124b00",
     #     appliance_name="Fan",
     # )
-    backfill_weekly_from_export("files/all_daily_summary.json")
+    preds = backfill_predictions("daily_summary.json")
+    pprint.pprint(preds)
+    # backfill_weekly_from_export("files/all_daily_summary.json")
     # backfill_multi_day_usage(
     #     input_file="usage1.json",  # your file with {"2025-08-01": {...}, "2025-08-02": {...}}
     #     user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
