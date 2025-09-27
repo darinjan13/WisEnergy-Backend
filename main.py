@@ -23,7 +23,7 @@ load_dotenv()
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PH_TZ = timezone("Asia/Manila")
 
 cred = credentials.Certificate("serviceAccount.json")
@@ -37,7 +37,7 @@ initialize_app(
 
 fs = firestore.client()
 app = FastAPI()
-client_gemini = genai.Client()
+client_gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 origins = [
     "http://localhost:5173",  # your Vite dev server
