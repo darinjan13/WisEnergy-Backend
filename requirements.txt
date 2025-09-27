@@ -5,10 +5,9 @@ pandas==2.2.2
 prophet==1.1.5
 apscheduler==3.10.4
 pytz==2024.1
-google-cloud-firestore==2.14.0
 python-dotenv==1.0.1
 requests==2.31.0
 pydantic[email]
-secure-smtplib
 numpy==1.26.4
 sendgrid
+google-generativeai

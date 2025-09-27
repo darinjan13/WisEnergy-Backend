@@ -1,8 +1,10 @@
 import os
-import smtplib
 import random
 import pandas as pd
+import json
+import re
 
+from google import genai
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from dotenv import load_dotenv
@@ -15,13 +17,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from pytz import timezone
 from prophet import Prophet
-from email.mime.text import MIMEText
 
 load_dotenv()
 
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PH_TZ = timezone("Asia/Manila")
 
 cred = credentials.Certificate("serviceAccount.json")
@@ -35,6 +37,7 @@ initialize_app(
 
 fs = firestore.client()
 app = FastAPI()
+client_gemini = genai.Client()
 
 origins = [
     "http://localhost:5173",  # your Vite dev server
@@ -51,6 +54,7 @@ app.add_middleware(
 
 class OTPRequest(BaseModel):
     email: EmailStr
+    userVerification: bool
 
 
 class PasswordResetRequest(BaseModel):
@@ -256,57 +260,6 @@ def total_energy_consumption():
     print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")
 
 
-def generate_recommendations(user_id: str = None):
-    now_ph = datetime.now(PH_TZ)
-    today = now_ph.strftime("%Y-%m-%d")
-    last_hour_key = (now_ph - timedelta(hours=1)).strftime("%H:00")
-
-    print(f"🤖 Generating recommendations for {today} {last_hour_key}...")
-
-    if user_id:
-        # Limit reads to one user only
-        user_root = db.reference(f"/daily_summary/{user_id}").get() or {}
-        daily_root = {user_id: user_root}
-    else:
-        daily_root = db.reference("/daily_summary").get() or {}
-
-    recommendations = {}
-
-    for uid, devices in (daily_root or {}).items():
-        tips = []
-
-        for device_id, appliances in (devices or {}).items():
-            for appliance_name, days in (appliances or {}).items():
-                summary = days.get(today)
-                if not summary:
-                    continue
-
-                hourly = (summary or {}).get("hourly", {})
-                last_hour_kwh = float(hourly.get(last_hour_key, 0))
-
-                if last_hour_kwh and last_hour_kwh > 0.5:  # example threshold
-                    tips.append(
-                        f"⚡ {appliance_name} consumed {last_hour_kwh:.2f} kWh in the last hour."
-                    )
-
-                total_kwh = float(summary.get("total_kWh", 0))
-                if total_kwh > 5:  # another rule
-                    tips.append(
-                        f"📊 Your total usage today reached {total_kwh:.2f} kWh already."
-                    )
-
-        if tips:
-            recommendations[uid] = {
-                "tips": tips,
-                "generated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
-                "date": today,
-                "hour": last_hour_key,
-            }
-
-    print("✅ Recommendations generated.")
-    return recommendations
-
-
 scheduler = BackgroundScheduler()
 # scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
@@ -352,9 +305,25 @@ def generate_otp_code():
     return f"{random.randint(10000, 99999)}"
 
 
-def send_otp_email(to_email: str, otp: str):
-    subject = "Your WisEnergy Password Reset Code"
-    body = f"Your reset code: {otp}\nIt will expire in 5 minutes"
+def send_otp_email(to_email: str, otp: str, userVerification: bool):
+    if userVerification:
+        subject = "Verify Your WisEnergy Account"
+        body = (
+            f"Hello,\n\n"
+            f"Thanks for signing up! Please use the following code to verify your account:\n\n"
+            f"Verification Code: {otp}\n\n"
+            f"This code will expire in 5 minutes.\n\n"
+            f"Welcome to WisEnergy!"
+        )
+    else:
+        subject = "Your WisEnergy Password Reset Code"
+        body = (
+            f"Hello,\n\n"
+            f"We received a request to reset your password. Use the code below to proceed:\n\n"
+            f"Reset Code: {otp}\n\n"
+            f"This code will expire in 5 minutes.\n\n"
+            f"If you didn't request this, please ignore this email."
+        )
 
     message = Mail(
         from_email=EMAIL_ADDRESS,
@@ -370,22 +339,9 @@ def send_otp_email(to_email: str, otp: str):
         raise HTTPException(status_code=500, detail=f"Email send failed: {str(e)}")
 
 
-def split_name(full_name: str):
-    if not full_name:
-        return None, None
-
-    parts = full_name.strip().split()
-
-    if len(parts) == 1:
-        return parts[0], ""
-    else:
-        first_name = " ".join(parts[:-1])
-        last_name = parts[-1]
-        return first_name, last_name
-
-
 @app.get("/")
 def root():
+    print(OPENAI_API_KEY)
     return {"message": "WisEnergy daily summary updater is active."}
 
 
@@ -403,17 +359,6 @@ def status():
         "server_time": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "scheduler": "active",
     }
-
-
-@app.get("/generate-reccomendations")
-def recommendations(user_id: str = Query(None)):
-    """
-    Generate recommendations.
-    - If user_id provided: only process that user.
-    - Else: process all users.
-    """
-    recs = generate_recommendations(user_id=user_id)
-    return {"status": "ok", "recommendations": recs}
 
 
 @app.get("/devices")
@@ -517,7 +462,7 @@ def verify_email(req: OTPRequest):
 
 @app.post("/generate-otp")
 def generate_otp(req: OTPRequest):
-    print(f"{req.email}")
+    print(f"{req.userVerification}")
     try:
         auth.get_user_by_email(req.email)
     except auth.UserNotFoundError:
@@ -530,7 +475,7 @@ def generate_otp(req: OTPRequest):
     fs.collection("otp-verification").document(email_id).set(
         {"otp": otp, "expires_at": expires.isoformat(), "verified": False}
     )
-    send_otp_email(req.email, otp)
+    send_otp_email(req.email, otp, req.userVerification)
 
     return {"message": f"OTP sent to {req.email}"}
 
@@ -573,166 +518,204 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
         raise HTTPException(status_code=500, detail=str(e))
 
 
-import json
+def generate_recommendation(user_data: dict):
+    """
+    Use Gemini API to generate AI-based recommendations based on energy consumption data.
+    """
+    prompt = f"""
+        Given the energy consumption data: {json.dumps(user_data)},
+        provide a JSON response with:
+        1. "peaks": always Identify peak time(), peak kWh and use the appliance name as keys (ignore appliances with no data for today) and dont use device.
+        2. "recommendations": List at least 3 concise recommendations to reduce energy usage (2-3 sentences each) message only no title.
+        3. "insights": List at least 3 concise analysis base on the usage data (1-2 sentences each) message only no title.
+        Ensure recommendations are practical, and avoid mentioning products.
+    """
+
+    try:
+        response = client_gemini.models.generate_content(
+            # model="gemini-2.5-pro",
+            # model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
+
+        # Clean the response text (remove ```json and ``` markers)
+        cleaned_response = re.sub(r"^```json\n|```$", "", response.text).strip()
+        # Attempt to parse the cleaned response as
+        try:
+            data = json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON: {e}")
+            return {"peaks": [], "recommendations": [], "insights": []}
+
+        # Check if the parsed data is a dictionary as expected
+        if isinstance(data, dict):
+            if "peaks" in data:
+                # Standardize peak fields by iterating through each appliance
+                peaks = data["peaks"]
+                standardized_peaks = []
+                for appliance, peak in peaks.items():
+                    standardized_peaks.append(
+                        {
+                            "appliance": appliance,
+                            "hour": peak.get("peak_time", peak.get("hour"))
+                            or peak.get("peak_hour"),
+                            "kWh": peak.get("peak_kWh", peak.get("kWh"))
+                            or peak.get("peak_kwh"),
+                        }
+                    )
+                data["peaks"] = standardized_peaks
+
+            return data
+        else:
+            print(f"Error: Expected a dictionary, but got {type(data)}")
+            return {"peaks": [], "recommendations": [], "insights": []}
+
+    except Exception as e:
+        print(f"Error generating recommendation with Gemini: {e}")
+        return {"peaks": [], "recommendations": [], "insights": []}
 
 
-def parse_time_key(date_str, time_str):
-    """Convert 'YYYY-MM-DD', 'HH_MM_SS' to datetime"""
-    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H_%M_%S")
+@app.get("/generate-recommendations/{user_id}/{date}")
+async def get_recommendations(user_id: str, date: datetime):
+    """
+    Endpoint to generate recommendations for the given user_id and date.
+    Falls back to rule-based logic only if Gemini API fails.
+    """
+    # Fetch user data once
+    user_data = fetch_user_data(user_id, date)
 
+    # Generate AI-based recommendations (or empty dict on failure)
+    ai_recommendations = generate_recommendation(user_data)
 
-def compute_daily_summary(date, readings):
-    if not readings:
-        return None
+    # Initialize peaks and tips based on Gemini, fallback to rules if Gemini fails
+    now_ph = datetime.now(PH_TZ)  # 4:43 PM PHT, Saturday, September 27, 2025
+    today = now_ph.strftime("%Y-%m-%d")
+    budget_ref = db.reference(
+        f"/user_monthly_budget/{user_id}/{now_ph.year}/{now_ph.month:02d}/budget_kwh"
+    )
+    monthly_budget = budget_ref.get() or 0.0
+    daily_budget = monthly_budget / 30 if monthly_budget else float("inf")
+    peaks = ai_recommendations.get("peaks", [])
+    tips = (
+        [
+            {"priority": "low", "message": rec}
+            for rec in ai_recommendations.get("recommendations", [])
+        ]
+        if ai_recommendations
+        else []
+    )
+    recommendations = ai_recommendations.get("recommendations", [])
+    insights = ai_recommendations.get("insights", [])
+    budget_alerts = []
 
-    # Sort readings by time
-    readings.sort(key=lambda x: x[0])
+    # Only apply rule-based logic if Gemini failed (ai_recommendations is empty)
+    if not ai_recommendations or not any(ai_recommendations.values()):
 
-    powers = [p for _, p in readings]
-    avg_power = sum(powers) / len(powers)
-    max_power = max(powers)
+        last_hour_key = (now_ph - timedelta(hours=1)).strftime("%H:00")  # "15:00"
 
-    total_kWh = 0.0
-    hourly = {}
+        rule_based_tips = []
+        rule_based_peaks = []
 
-    for i in range(len(readings) - 1):
-        t1, p1 = readings[i]
-        t2, _ = readings[i + 1]
+        # Fetch budget and monthly consumption
 
-        interval_sec = (t2 - t1).total_seconds()
-        interval_hr = interval_sec / 3600
+        monthly_total_ref = db.reference(
+            f"/monthly_total_consumption/{user_id}/{now_ph.year}/{now_ph.month:02d}"
+        )
+        monthly_total = monthly_total_ref.get() or {"total_energy_consumption": 0.0}
+        monthly_kwh = float(monthly_total.get("total_energy_consumption", 0.0))
 
-        kWh = (p1 * interval_hr) / 1000
-        total_kWh += kWh
+        # Process rule-based logic using user_data for any appliance
+        for device_id, appliances in user_data.items():
+            for appliance_name, data in appliances.items():
+                summary = data
+                if not summary:
+                    continue
+                hourly = summary.get("hourly", {})
+                last_hour_kwh = float(hourly.get(last_hour_key, 0))
+                total_kwh = float(summary.get("total_kWh", 0))
+                avg_power = float(summary.get("avg_power", 0))
 
-        hour_key = t1.strftime("%H:00")
-        hourly[hour_key] = hourly.get(hour_key, 0) + kWh
+                # Historical data (requires additional Firebase fetch or caching)
+                historical_kwh = []
+                for i in range(1, 8):
+                    past_date = (now_ph - timedelta(days=i)).strftime("%Y-%m-%d")
+                    past_data_ref = db.reference(
+                        f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{past_date}"
+                    )
+                    past_summary = past_data_ref.get() or {}
+                    past_kwh = float(past_summary.get("total_kWh", 0))
+                    if past_kwh > 0:
+                        historical_kwh.append(past_kwh)
+                avg_historical_kwh = (
+                    sum(historical_kwh) / len(historical_kwh) if historical_kwh else 0
+                )
 
-    updated_at = readings[-1][0].strftime("%Y-%m-%d %H:%M:%S")
+                # Rule-based peaks for any appliance
+                if last_hour_kwh > 0.05 or (
+                    avg_historical_kwh and last_hour_kwh > 1.5 * avg_historical_kwh
+                ):
+                    rule_based_peaks.append(
+                        {
+                            "appliance": appliance_name,
+                            "kWh": round(last_hour_kwh, 2),
+                            "hour": last_hour_key,
+                        }
+                    )
+
+                # Rule-based tips for any appliance with high usage
+                if last_hour_kwh > 0.05:
+                    rule_based_tips.append(
+                        {
+                            "priority": "high",
+                            "message": f"High usage for {appliance_name} ({last_hour_kwh:.2f} kWh in {last_hour_key}). Reduce usage or turn off when not needed.",
+                        }
+                    )
+
+                # Budget alerts for any appliance
+                if total_kwh > daily_budget * 0.1:
+                    budget_alerts.append(
+                        {
+                            "message": f"{appliance_name} contributed {total_kwh:.2f} kWh today. Reduce usage to stay within your {monthly_budget:.2f} kWh budget."
+                        }
+                    )
+
+        # Use rule-based peaks and tips only if Gemini failed
+        peaks = rule_based_peaks
+        tips = rule_based_tips
 
     return {
-        "avg_power": round(avg_power, 2),
-        "hourly": {h: round(v, 6) for h, v in hourly.items()},
-        "max_power": round(max_power, 2),
-        "total_kWh": round(total_kWh, 5),
-        "updated_at": updated_at,
+        "peaks": peaks,
+        "tips": tips,
+        "recommendations": recommendations,
+        "insights": insights,
+        "budget_alerts": budget_alerts,
     }
 
 
-@app.get("/process-fan")
-def process_fan():
-    try:
-        with open("fridge.json") as f:  # your merged Aug+Sept file
-            raw_data = json.load(f)
-
-        processed = {}
-
-        for date, times in raw_data.items():
-            readings = []
-            for time_str, record in times.items():
-                if "power" not in record:
-                    continue
-                t = parse_time_key(date, time_str)
-                readings.append((t, record["power"]))
-
-            daily_summary = compute_daily_summary(date, readings)
-            if daily_summary:
-                processed[date] = daily_summary
-
-        # Save processed results
-        with open("fridge_processed.json", "w") as f:
-            json.dump(processed, f, indent=2)
-
-        return {
-            "status": "success",
-            "message": "Processed data saved as fan_usage_processed.json",
-            "days_processed": len(processed),
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-def rolling_backfill_predictions_with_regressors(
-    daily_json: dict, start_date: str, out_file: str = None
-):
+# @app.get("/asd/{user_id}/{date}")
+def fetch_user_data(user_id: str, date: datetime):
     """
-    Backfills predictions starting from `start_date` using Prophet with regressors.
-    Uses data before each target date as training.
-    Returns dict in Firebase format.
+    Fetch real-time user energy consumption data for a specific date from Firebase.
     """
-    all_dates = sorted(daily_json.keys())
-    start_idx = all_dates.index(start_date)
+    date_str = date.strftime("%Y-%m-%d")
+    user_data_ref = db.reference(f"/daily_summary/{user_id}")
 
-    results = {}
+    user_data = user_data_ref.get()
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User data not found.")
 
-    for i in range(start_idx, len(all_dates)):
-        target_date = all_dates[i]
-
-        # training set = all dates before target_date
-        train_dates = all_dates[:i]
-        if len(train_dates) < 2:
-            continue
-
-        records = []
-        for d in train_dates:
-            try:
-                total_kwh = float(daily_json[d].get("total_kWh", 0))
-                avg_power = float(daily_json[d].get("avg_power", 0))
-                max_power = float(daily_json[d].get("max_power", 0))
-
-                records.append(
-                    {
-                        "ds": datetime.strptime(d, "%Y-%m-%d"),
-                        "y": total_kwh,
-                        "avg_power": avg_power,
-                        "max_power": max_power,
-                    }
-                )
-            except Exception:
-                continue
-
-        df = pd.DataFrame(records).sort_values("ds")
-
-        # train Prophet with regressors
-        model = Prophet(daily_seasonality=True, yearly_seasonality=True)
-        model.add_regressor("avg_power")
-        model.add_regressor("max_power")
-        model.fit(df)
-
-        # Prepare future for the target_date
-        target_dt = datetime.strptime(target_date, "%Y-%m-%d")
-        future = pd.DataFrame(
-            {
-                "ds": [target_dt],
-                "avg_power": [daily_json[target_date].get("avg_power", 0)],
-                "max_power": [daily_json[target_date].get("max_power", 0)],
-            }
-        )
-
-        forecast = model.predict(future).iloc[0]
-
-        results[target_date] = {
-            "predicted_kWh": round(float(forecast["yhat"]), 2),
-            "timestamp": forecast["ds"].strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-
-        print(
-            f"✅ Forecasted {target_date}: {results[target_date]['predicted_kWh']} kWh"
-        )
-
-    # optional save
-    if out_file:
-        with open(out_file, "w") as f:
-            json.dump(results, f, indent=2)
-
-    return results
-
-
-@app.get("/qwe")
-def backfill_predictions():
-    with open("fan_usage_processed.json", "r") as f:
-        fan_data = json.load(f)
-
-    preds = rolling_backfill_predictions_with_regressors(
-        fan_data, start_date="2025-08-14", out_file="fan_predictions.json"
-    )
+    result = {}
+    for device_id, device_data in user_data.items():
+        for appliance_name, appliance_data in device_data.items():
+            if date_str in appliance_data:
+                daily_data = appliance_data[date_str]
+                result[device_id] = result.get(device_id, {})
+                result[device_id][appliance_name] = {
+                    "avg_power": daily_data.get("avg_power", "No data available"),
+                    "max_power": daily_data.get("max_power", "No data available"),
+                    "hourly": daily_data.get("hourly", "No hourly data available"),
+                    "total_kWh": daily_data.get("total_kWh", 0),
+                    "updated_at": daily_data.get("updated_at", "No data available"),
+                }
+    return result
