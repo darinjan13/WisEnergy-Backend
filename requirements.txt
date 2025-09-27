@@ -10,4 +10,4 @@ requests==2.31.0
 pydantic[email]
 numpy==1.26.4
 sendgrid
-google-generativeai
+google-genai
