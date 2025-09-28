@@ -82,6 +82,7 @@ def hourly_summary_update():
                 db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True) or {}
             )
             for appliance_name in appliances:
+                # Fetch ALL of today's usage for this appliance
                 day_data = (
                     db.reference(
                         f"/usage/{user_id}/{device_id}/{appliance_name}/{today}"
@@ -92,11 +93,12 @@ def hourly_summary_update():
                 if not day_data:
                     continue
 
+                # Filter only current hour
                 powers = []
                 for ts, rec in day_data.items():
                     try:
                         ts_dt = datetime.strptime(ts, "%H_%M_%S")
-                        if ts_dt.hour == now_ph.hour:
+                        if ts_dt.strftime("%H:00") == hour_key:
                             powers.append(float(rec.get("power", 0)))
                     except:
                         continue
@@ -104,6 +106,7 @@ def hourly_summary_update():
                 if not powers:
                     continue
 
+                # Energy consumed in this hour
                 total_kwh_hour = sum(
                     (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
                 )
@@ -114,19 +117,18 @@ def hourly_summary_update():
                 )
                 existing = daily_ref.get() or {}
 
+                # Update hourly bucket
                 hourly_ref = daily_ref.child("hourly")
                 hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
-                all_hourly = hourly_ref.get() or {}
 
+                # Recompute totals properly
+                all_hourly = hourly_ref.get() or {}
                 new_total = sum(all_hourly.values())
 
-                hourly_data = existing.get("hourly", {}) or {}
-                total_kwh_so_far = sum(hourly_data.values())
+                # Compute avg_power directly from all today's readings
+                all_powers = [float(rec.get("power", 0)) for rec in day_data.values()]
+                avg_power_day = sum(all_powers) / len(all_powers) if all_powers else 0
 
-                hours_so_far = len(hourly_data)
-                avg_power_day = (
-                    (total_kwh_so_far * 1000) / hours_so_far if hours_so_far else 0
-                )
                 daily_ref.update(
                     {
                         "total_kWh": round(new_total, 6),
@@ -260,9 +262,62 @@ def total_energy_consumption():
     print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")
 
 
+def scheduled_prediction_update():
+    now = datetime.now(PH_TZ)
+    today = now.strftime("%Y-%m-%d")
+    week_key = now.strftime("%Y-W%U")
+
+    print(f"🔮 Running scheduled prediction update for {today} / {week_key}...")
+
+    # Fetch all users and devices
+    daily_root = db.reference("/daily_summary").get() or {}
+    for user_id, devices in daily_root.items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name in (appliances or {}).keys():
+                # ---- Daily Prediction ----
+                daily_pred = appliance_daily_prediction(
+                    user_id, device_id, appliance_name
+                )
+                if daily_pred:
+                    db.reference(
+                        f"/predictions/{user_id}/{device_id}/{appliance_name}/daily/{today}"
+                    ).set(
+                        {
+                            "predicted_kWh": daily_pred,
+                            "timestamp": now.isoformat(),
+                            "model": "Prophet",
+                            "horizon": "D0",
+                        }
+                    )
+                    print(f"✅ Daily prediction stored for {appliance_name} ({today})")
+
+                # ---- Weekly Prediction (only on Mondays) ----
+                if now.weekday() == 0:  # Monday → run weekly forecast
+                    weekly_pred = appliance_weekly_prediction(
+                        user_id, device_id, appliance_name
+                    )
+                    if weekly_pred:
+                        db.reference(
+                            f"/predictions/{user_id}/{device_id}/{appliance_name}/weekly/{week_key}"
+                        ).set(
+                            {
+                                "predicted_kWh": weekly_pred,
+                                "timestamp": now.isoformat(),
+                                "model": "Prophet",
+                                "horizon": "W0",
+                            }
+                        )
+                        print(
+                            f"✅ Weekly prediction stored for {appliance_name} ({week_key})"
+                        )
+
+
 scheduler = BackgroundScheduler()
 # scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
+scheduler.add_job(
+    scheduled_prediction_update, "cron", hour=0, minute=20, timezone=PH_TZ
+)
 scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
 scheduler.start()
 
@@ -298,6 +353,52 @@ def appliance_daily_prediction(user_id, device_id, appliance_name):
     predicted_kwh = round(prediction["yhat"], 2)
 
     print(f"Predicted kwh for tomorrow: {predicted_kwh}")
+    return predicted_kwh
+
+
+def appliance_weekly_prediction(user_id, device_id, appliance_name):
+    MIN_WEEKS = 4
+    weekly_ref = db.reference(f"/weekly_summary/{user_id}/{device_id}/{appliance_name}")
+    weekly_data = weekly_ref.get()
+
+    if not weekly_data:
+        print("❌ No weekly data.")
+        return None
+
+    rows = []
+    for year, months in weekly_data.items():
+        for month, weeks in months.items():
+            for week, summary in weeks.items():
+                try:
+                    start_date = summary.get("start_date")
+                    total_kwh = float(summary.get("total_kWh", 0))
+                    if total_kwh > 0 and start_date:
+                        rows.append({"ds": start_date, "y": total_kwh})
+                except Exception as e:
+                    print("⚠️ Error parsing:", e)
+                    continue
+
+    if len(rows) < MIN_WEEKS:
+        print("❌ Not enough weekly data.")
+        return None
+
+    df = pd.DataFrame(rows)
+    df["ds"] = pd.to_datetime(df["ds"])
+    df = df.sort_values("ds")
+
+    model = Prophet(weekly_seasonality=True)
+    model.fit(df)
+
+    # Predict 1 week ahead
+    future = model.make_future_dataframe(
+        periods=1, freq="W-MON"
+    )  # weekly, start Monday
+    forecast = model.predict(future)
+
+    prediction = forecast.iloc[-1]
+    predicted_kwh = round(prediction["yhat"], 2)
+
+    print(f"📈 Predicted kWh for next week: {predicted_kwh}")
     return predicted_kwh
 
 
@@ -341,7 +442,6 @@ def send_otp_email(to_email: str, otp: str, userVerification: bool):
 
 @app.get("/")
 def root():
-    print(OPENAI_API_KEY)
     return {"message": "WisEnergy daily summary updater is active."}
 
 
@@ -483,36 +583,91 @@ def generate_otp(req: OTPRequest):
 @app.get("/predict/{user_id}/{device_id}/{appliance_name}")
 def predict_and_return_history(user_id: str, device_id: str, appliance_name: str):
     try:
-        today = datetime.now().date().strftime("%Y-%m-%d")
+        today = datetime.now().date()
 
-        ref = db.reference(
-            f"/predictions/{user_id}/{device_id}/{appliance_name}/{today}"
+        # ---------- DAILY ----------
+        daily_ref = db.reference(
+            f"/predictions/{user_id}/{device_id}/{appliance_name}/daily"
         )
-        existing = ref.get()
+        all_daily = daily_ref.get() or {}
 
-        if not existing:
+        # find last predicted date if any
+        last_pred_date = (
+            max(datetime.strptime(d, "%Y-%m-%d").date() for d in all_daily.keys())
+            if all_daily
+            else None
+        )
+        start_date = last_pred_date + timedelta(days=1) if last_pred_date else today
+
+        # fill until today
+        current = start_date
+        while current <= today:
             result = appliance_daily_prediction(user_id, device_id, appliance_name)
-            if result is None:
-                raise HTTPException(
-                    status_code=400, detail="Not enough data for prediction."
-                )
+            if result is not None:
+                payload = {
+                    "predicted_kWh": round(result, 2),
+                    "timestamp": f"{current.strftime('%Y-%m-%d')} 00:05:00",
+                    "model": "Prophet",
+                    "horizon": "D0",
+                }
+                daily_ref.child(current.isoformat()).set(payload)
+            current += timedelta(days=1)
 
-            predicted_kwh = round(result, 2)
-            payload = {
-                "predicted_kWh": predicted_kwh,
-                "timestamp": datetime.now().isoformat(),
-                "model": "Prophet",
-                "horizon": "D0",
-            }
-            ref.set(payload)
+        all_daily = daily_ref.get() or {}
+        last5_daily = {d: all_daily[d] for d in sorted(all_daily.keys())[-5:]}
 
-        pred_ref = db.reference(f"/predictions/{user_id}/{device_id}/{appliance_name}")
-        all_preds = pred_ref.get() or {}
+        # ---------- WEEKLY ----------
+        now = datetime.now()
+        current_week = f"{((now.day - 1) // 7) + 1:02d}"
+        y, m = str(now.year), f"{now.month:02d}"
 
-        dates = sorted(all_preds.keys())[-5:]
-        past5 = {d: all_preds[d] for d in dates}
+        weekly_ref = db.reference(
+            f"/predictions/{user_id}/{device_id}/{appliance_name}/weekly"
+        )
+        all_weekly = weekly_ref.get() or {}
 
-        return {"predictions": past5}
+        # flatten existing
+        flat_weeks = []
+        for yy, months in (all_weekly or {}).items():
+            for mm, weeks in (months or {}).items():
+                for ww, payload in (weeks or {}).items():
+                    flat_weeks.append((int(yy), int(mm), int(ww), payload))
+        flat_weeks.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        # last existing week
+        last_week = flat_weeks[-1] if flat_weeks else None
+        # compute current bucket
+        target_week = (now.year, now.month, int(current_week))
+
+        # fill gaps up to current week
+        if not last_week or (last_week[0], last_week[1], last_week[2]) < target_week:
+            result = appliance_weekly_prediction(user_id, device_id, appliance_name)
+            if result is not None:
+                payload = {
+                    "predicted_kWh": round(result, 2),
+                    "timestamp": f"{now.strftime('%Y-%m-%d')} 00:05:00",
+                    "model": "Prophet",
+                    "horizon": "W0",
+                }
+                weekly_ref.child(str(now.year)).child(f"{now.month:02d}").child(
+                    current_week
+                ).set(payload)
+
+        # reload weekly
+        all_weekly = weekly_ref.get() or {}
+        flat_weeks = []
+        for yy, months in (all_weekly or {}).items():
+            for mm, weeks in (months or {}).items():
+                for ww, payload in (weeks or {}).items():
+                    flat_weeks.append((int(yy), int(mm), int(ww), payload))
+        flat_weeks.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        last5_weekly = [
+            {"year": yy, "month": f"{mm:02d}", "week": f"{ww:02d}", "data": payload}
+            for yy, mm, ww, payload in flat_weeks[-5:]
+        ]
+
+        return {"daily": last5_daily, "weekly": last5_weekly}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

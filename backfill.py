@@ -390,19 +390,260 @@ def backfill_predictions(json_file, min_days=7, output_file="predictions.json"):
     return predictions
 
 
-import pprint
+# ASDASDASDASD
+
+
+def _kwh_from(d: dict, key_upper="total_kWh"):
+    if d is None:
+        return 0.0
+    return float(d.get(key_upper, d.get(key_upper.lower(), 0.0)) or 0.0)
+
+
+def _safe_iso_from_date(dt: datetime) -> str:
+    # midnight timestamp for the prediction date
+    return f"{dt.strftime('%Y-%m-%d')} 00:05:00"
+
+
+def _store_daily_pred(uid, device_id, appliance, day_dt, yhat):
+    day_str = day_dt.date().isoformat()
+    ref = db.reference(f"/predictions/{uid}/{device_id}/{appliance}/daily/{day_str}")
+    if ref.get():
+        return False
+    payload = {
+        "predicted_kWh": round(float(yhat), 2),
+        "timestamp": _safe_iso_from_date(day_dt),
+        "model": "Prophet",
+        "horizon": "D0",
+    }
+    ref.set(payload)
+    return True
+
+
+def _store_weekly_pred(uid, device_id, appliance, y, m, w, week_dt, yhat):
+    ref = db.reference(f"/predictions/{uid}/{device_id}/{appliance}/weekly/{y}/{m}/{w}")
+    if ref.get():
+        return False
+    payload = {
+        "predicted_kWh": round(float(yhat), 2),
+        "timestamp": _safe_iso_from_date(week_dt),
+        "model": "Prophet",
+        "horizon": "W0",
+    }
+    ref.set(payload)
+    return True
+
+
+def backfill_daily_predictions_from_export(
+    daily_export_file: str,
+    min_days: int = 7,
+    write_to_firebase: bool = True,
+    output_json: str | None = "daily_predictions_backfill.json",
+):
+    with open(daily_export_file, "r") as f:
+        data = json.load(f)
+
+    out = {}
+    total_written = 0
+    today = datetime.now().date()
+
+    for uid, devices in (data or {}).items():
+        out.setdefault(uid, {})
+        for device_id, appliances in (devices or {}).items():
+            out[uid].setdefault(device_id, {})
+            for appliance, days in (appliances or {}).items():
+                if not isinstance(days, dict) or not days:
+                    continue
+
+                date_keys = sorted(d for d in days.keys() if isinstance(d, str))
+                if len(date_keys) < (min_days + 1):
+                    continue
+
+                y_by_day = {d: _kwh_from(days[d]) for d in date_keys}
+
+                start_date = datetime.strptime(date_keys[0], "%Y-%m-%d").date()
+                end_date = max(
+                    datetime.strptime(date_keys[-1], "%Y-%m-%d").date(), today
+                )
+
+                appliance_preds = {}
+                current_date = start_date
+
+                while current_date <= end_date:
+                    # training set = all past available days up to current_date - 1
+                    train_rows = [
+                        {"ds": d, "y": y_by_day[d]}
+                        for d in date_keys
+                        if datetime.strptime(d, "%Y-%m-%d").date() < current_date
+                        and y_by_day[d] > 0
+                    ]
+                    if len(train_rows) < min_days:
+                        current_date += timedelta(days=1)
+                        continue
+
+                    df = pd.DataFrame(train_rows)
+                    df["ds"] = pd.to_datetime(df["ds"])
+
+                    model = Prophet(daily_seasonality=True)
+                    model.fit(df)
+
+                    target_ds = pd.to_datetime(current_date.isoformat())
+                    forecast = model.predict(pd.DataFrame({"ds": [target_ds]}))
+                    yhat = float(forecast.iloc[0]["yhat"])
+
+                    appliance_preds[current_date.isoformat()] = {
+                        "predicted_kWh": round(yhat, 2),
+                        "timestamp": _safe_iso_from_date(target_ds),
+                        "model": "Prophet",
+                        "horizon": "D0",
+                    }
+
+                    if write_to_firebase and _store_daily_pred(
+                        uid, device_id, appliance, target_ds, yhat
+                    ):
+                        total_written += 1
+
+                    current_date += timedelta(days=1)
+
+                out[uid][device_id][appliance] = appliance_preds
+
+    if output_json:
+        with open(output_json, "w") as f:
+            json.dump(out, f, indent=2)
+
+    print(f"✅ Daily backfill complete. Predictions written: {total_written}")
+    return out
+
+
+def backfill_weekly_predictions_from_export(
+    weekly_export_file: str,
+    min_weeks: int = 4,
+    write_to_firebase: bool = True,
+    output_json: str | None = "weekly_predictions_backfill.json",
+):
+    with open(weekly_export_file, "r") as f:
+        data = json.load(f)
+
+    out = {}
+    total_written = 0
+    today = datetime.now().date()
+
+    for uid, devices in (data or {}).items():
+        out.setdefault(uid, {})
+        for device_id, appliances in (devices or {}).items():
+            out[uid].setdefault(device_id, {})
+            for appliance, years in (appliances or {}).items():
+                series = []
+                for y, months in (years or {}).items():
+                    for m, weeks in (months or {}).items():
+                        for w, payload in (weeks or {}).items():
+                            kwh = _kwh_from(payload)
+                            sd = payload.get("start_date")
+                            try:
+                                sort_key = (
+                                    datetime.strptime(sd, "%Y-%m-%d")
+                                    if sd
+                                    else datetime(int(y), int(m), (int(w) - 1) * 7 + 1)
+                                )
+                            except Exception:
+                                sort_key = datetime(int(y), int(m), 1)
+                            series.append((sort_key, y, m, f"{int(w):02d}", kwh))
+
+                if len(series) < (min_weeks + 1):
+                    continue
+
+                series.sort(key=lambda t: t[0])
+                start = series[0][0].date()
+                end = max(series[-1][0].date(), today)
+
+                preds = {}
+                current = start
+                while current <= end:
+                    train = [t for t in series if t[0].date() < current]
+                    rows = [
+                        {"ds": t[0].date().isoformat(), "y": t[4]}
+                        for t in train
+                        if t[4] > 0
+                    ]
+                    if len(rows) < min_weeks:
+                        current += timedelta(days=7)
+                        continue
+
+                    df = pd.DataFrame(rows)
+                    df["ds"] = pd.to_datetime(df["ds"])
+
+                    model = Prophet(weekly_seasonality=True, daily_seasonality=False)
+                    model.fit(df)
+
+                    target_ds = pd.to_datetime(current.isoformat())
+                    forecast = model.predict(pd.DataFrame({"ds": [target_ds]}))
+                    yhat = float(forecast.iloc[0]["yhat"])
+
+                    y, m, w = (
+                        str(current.year),
+                        f"{current.month:02d}",
+                        f"{((current.day - 1) // 7) + 1:02d}",
+                    )
+                    preds.setdefault(y, {}).setdefault(m, {})[w] = {
+                        "predicted_kWh": round(yhat, 2),
+                        "timestamp": _safe_iso_from_date(target_ds),
+                        "model": "Prophet",
+                        "horizon": "W0",
+                    }
+
+                    if write_to_firebase and _store_weekly_pred(
+                        uid, device_id, appliance, y, m, w, target_ds, yhat
+                    ):
+                        total_written += 1
+
+                    current += timedelta(days=7)
+
+                out[uid][device_id][appliance] = preds
+
+    if output_json:
+        with open(output_json, "w") as f:
+            json.dump(out, f, indent=2)
+
+    print(f"✅ Weekly backfill complete. Predictions written: {total_written}")
+    return out
+
+
+def backfill_predictions_from_exports(
+    daily_export_file: str | None,
+    weekly_export_file: str | None,
+    min_days: int = 7,
+    min_weeks: int = 4,
+    write_to_firebase: bool = True,
+):
+    daily_out = weekly_out = {}
+    if daily_export_file:
+        daily_out = backfill_daily_predictions_from_export(
+            daily_export_file, min_days=min_days, write_to_firebase=write_to_firebase
+        )
+    if weekly_export_file:
+        weekly_out = backfill_weekly_predictions_from_export(
+            weekly_export_file, min_weeks=min_weeks, write_to_firebase=write_to_firebase
+        )
+    return {"daily": daily_out, "weekly": weekly_out}
+
 
 if __name__ == "__main__":
     # hourly_summary_update()
     # backfill_single_day_usage(
-    #     input_file="files/fan_23.json",
-    #     target_date="2025-09-23",
+    #     input_file="files/fridge_28.json",
+    #     target_date="2025-09-28",
     #     user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
     #     device_id="d8bc24124b00",
-    #     appliance_name="Fan",
+    #     appliance_name="Fridge",
     # )
-    preds = backfill_predictions("daily_summary.json")
-    pprint.pprint(preds)
+    backfill_predictions_from_exports(
+        daily_export_file="files/daily_summary.json",
+        weekly_export_file="files/weekly_summary.json",
+        min_days=7,  # require at least 7 past days to start predicting
+        min_weeks=4,  # require at least 4 past weeks to start predicting
+        write_to_firebase=True,
+    )
+    # preds = backfill_predictions("files/daily_summary.json")
+    # pprint.pprint(preds)
     # backfill_weekly_from_export("files/all_daily_summary.json")
     # backfill_multi_day_usage(
     #     input_file="usage1.json",  # your file with {"2025-08-01": {...}, "2025-08-02": {...}}
