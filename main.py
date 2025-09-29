@@ -62,11 +62,30 @@ class PasswordResetRequest(BaseModel):
     new_password: str
 
 
+class User(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    location: str
+    role: str
+
+
 def hourly_summary_update():
     now_ph = datetime.now(PH_TZ)
-    today = now_ph.strftime("%Y-%m-%d")
-    hour_key = now_ph.strftime("%H:00")
-    interval_seconds = 5
+    # Process the previous hour
+    prev_hour = now_ph - timedelta(hours=1)
+    today = prev_hour.strftime(
+        "%Y-%m-%d"
+    )  # Previous hour’s date, e.g., "2025-09-30" at 00:00
+    hour_key = prev_hour.strftime("%H:00")  # e.g., "23:00" at 00:00
+
+    # Determine week based on previous hour (Monday to Sunday)
+    current_day = prev_hour.weekday()
+    week_start = prev_hour - timedelta(days=current_day)  # Monday of this week
+    week_end = week_start + timedelta(days=6)  # Sunday of this week
+    y = str(week_start.year)
+    m = f"{week_start.month:02d}"
+    w = f"{((week_start.day - 1) // 7) + 1:02d}"
 
     print(f"📊 Running hourly summary update for {today} {hour_key}...")
 
@@ -82,7 +101,6 @@ def hourly_summary_update():
                 db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True) or {}
             )
             for appliance_name in appliances:
-                # Fetch ALL of today's usage for this appliance
                 day_data = (
                     db.reference(
                         f"/usage/{user_id}/{device_id}/{appliance_name}/{today}"
@@ -90,26 +108,32 @@ def hourly_summary_update():
                     or {}
                 )
 
-                if not day_data:
-                    continue
-
-                # Filter only current hour
-                powers = []
+                # Collect powers + timestamps for the previous hour
+                records = []
                 for ts, rec in day_data.items():
                     try:
                         ts_dt = datetime.strptime(ts, "%H_%M_%S")
-                        if ts_dt.strftime("%H:00") == hour_key:
-                            powers.append(float(rec.get("power", 0)))
+                        if ts_dt.hour == prev_hour.hour:
+                            p = float(rec.get("power", 0))
+                            records.append((ts_dt, p))
                     except:
                         continue
 
-                if not powers:
-                    continue
+                if len(records) < 2:
+                    continue  # Need at least 2 points for intervals
 
-                # Energy consumed in this hour
-                total_kwh_hour = sum(
-                    (p / 1000.0) * (interval_seconds / 3600.0) for p in powers
-                )
+                records.sort(key=lambda x: x[0])
+                total_kwh_hour = 0.0
+                powers = []
+
+                # Calculate energy by actual intervals
+                for i in range(len(records) - 1):
+                    t1, p1 = records[i]
+                    t2, _ = records[i + 1]
+                    dt_hr = (t2 - t1).total_seconds() / 3600
+                    total_kwh_hour += (p1 * dt_hr) / 1000
+                    powers.append(p1)
+
                 max_power_hour = max(powers)
 
                 daily_ref = db.reference(
@@ -117,35 +141,91 @@ def hourly_summary_update():
                 )
                 existing = daily_ref.get() or {}
 
-                # Update hourly bucket
+                # Prevent double-counting if hour already processed
                 hourly_ref = daily_ref.child("hourly")
-                hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
+                all_hourly = hourly_ref.get() or {}
+                if hour_key in all_hourly and all_hourly[hour_key] == round(
+                    total_kwh_hour, 6
+                ):
+                    print(
+                        f"ℹ️ Skipping update for {appliance_name}: Hour {hour_key} already processed"
+                    )
+                    continue
 
-                # Recompute totals properly
+                # Update hourly bucket
+                try:
+                    hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
+                except Exception as e:
+                    print(f"⚠️ Failed to update hourly data for {appliance_name}: {e}")
+                    continue
+
+                # Recompute daily totals
                 all_hourly = hourly_ref.get() or {}
                 new_total = sum(all_hourly.values())
 
-                # Compute avg_power directly from all today's readings
-                all_powers = [float(rec.get("power", 0)) for rec in day_data.values()]
+                # Daily average power across all day's readings
+                all_powers = [float(r.get("power", 0)) for r in day_data.values()]
                 avg_power_day = sum(all_powers) / len(all_powers) if all_powers else 0
 
-                daily_ref.update(
-                    {
-                        "total_kWh": round(new_total, 6),
-                        "avg_power": round(avg_power_day, 2),
-                        "max_power": max(
-                            float(existing.get("max_power", 0)), max_power_hour
-                        ),
-                        "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
-                    }
+                try:
+                    daily_ref.update(
+                        {
+                            "total_kWh": round(new_total, 6),
+                            "avg_power": round(avg_power_day, 2),
+                            "max_power": max(
+                                float(existing.get("max_power", 0)), max_power_hour
+                            ),
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed to update daily_summary for {appliance_name}: {e}")
+                    continue
+
+                print(
+                    f"✅ {appliance_name} {today} {hour_key}: "
+                    f"{len(records)} pts, avg={round(avg_power_day,1)}W, kWh={round(total_kwh_hour,4)}"
                 )
 
-                print(f"{user_id}/{device_id}/{appliance_name}/{today}/{hour_key} ✅")
+                # Update weekly_summary
+                weekly_ref = db.reference(
+                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+                )
+                try:
+                    existing_weekly = weekly_ref.get() or {}
+                    existing_kwh = float(existing_weekly.get("total_kWh", 0.0))
+                    new_kwh = existing_kwh + total_kwh_hour
 
-    print("✅ Hourly summary update completed.")
+                    # Cap end_date at week_end (Sunday)
+                    end_date = min(today, week_end.strftime("%Y-%m-%d"))
+
+                    weekly_ref.set(
+                        {
+                            "total_kWh": round(new_kwh, 6),
+                            "start_date": week_start.strftime("%Y-%m-%d"),
+                            "end_date": end_date,
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+
+                    print(
+                        f"📅 Weekly summary updated for {appliance_name} ({user_id}): "
+                        f"Week {y}-{m}-W{w}, total_kWh={round(new_kwh, 4)}, start_date={week_start.strftime('%Y-%m-%d')}, end_date={end_date}"
+                    )
+                except Exception as e:
+                    print(
+                        f"⚠️ Failed to update weekly_summary for {appliance_name}: {e}"
+                    )
+
+    print("🎉 Hourly and weekly summary update completed.")
 
 
-def summary_aggregation():
+def weekly_summary_aggregation():
+    """
+    Aggregate daily_summary into weekly_summary for the previous week (Monday to Sunday),
+    running on Mondays. Always create a weekly_summary entry for each user/device/appliance,
+    even if no daily_summary data exists (total_kWh = 0.0).
+    """
     now_ph = datetime.now(PH_TZ)
     now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -167,33 +247,60 @@ def summary_aggregation():
 
     print(f"📊 Starting weekly aggregation for {days[0]} → {days[-1]}")
 
+    # Get all users, devices, and appliances from /appliances or /daily_summary
+    appliances_root = db.reference("/appliances").get() or {}
     daily_root = db.reference("/daily_summary").get() or {}
-    for user_id, devices in (daily_root or {}).items():
-        for device_id, appliances in (devices or {}).items():
-            for appliance_name in (appliances or {}).keys():
-                total_kwh_week = 0.0
 
-                # Sum from daily_summary
-                for d in days:
-                    summary = db.reference(
-                        f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
-                    ).get()
-                    if summary:
-                        total_kwh_week += float(summary.get("total_kWh", 0.0))
+    # Combine user/device/appliance combinations from both paths
+    combinations = set()
+    for user_id, devices in appliances_root.items():
+        for device_id, appliances in devices.items():
+            for appliance_name in appliances.keys():
+                combinations.add((user_id, device_id, appliance_name))
+    for user_id, devices in daily_root.items():
+        for device_id, appliances in devices.items():
+            for appliance_name in appliances.keys():
+                combinations.add((user_id, device_id, appliance_name))
 
-                # Save into weekly_summary
-                db.reference(
-                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
-                ).set(
-                    {
-                        "total_kWh": round(total_kwh_week, 6),
-                        "start_date": prev_week_start.strftime("%Y-%m-%d"),
-                        "end_date": prev_week_end.strftime("%Y-%m-%d"),
-                        "updated_at": now_str,
-                    }
-                )
+    if not combinations:
+        print("⚠️ No appliances found for aggregation.")
+        return
 
-                print(f"✅ Weekly summary updated for {appliance_name} ({user_id})")
+    for user_id, device_id, appliance_name in combinations:
+        total_kwh_week = 0.0
+
+        # Sum from daily_summary
+        for d in days:
+            summary = db.reference(
+                f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
+            ).get()
+            if summary:
+                try:
+                    total_kwh_week += float(summary.get("total_kWh", 0.0))
+                except (ValueError, TypeError):
+                    continue
+
+        # Save into weekly_summary, even if total_kWh is 0.0
+        weekly_ref = db.reference(
+            f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+        )
+        try:
+            weekly_ref.set(
+                {
+                    "total_kWh": round(total_kwh_week, 6),
+                    "start_date": prev_week_start.strftime("%Y-%m-%d"),
+                    "end_date": prev_week_end.strftime("%Y-%m-%d"),
+                    "updated_at": now_str,
+                }
+            )
+            print(
+                f"✅ Weekly summary updated for {appliance_name} ({user_id}): total_kWh={round(total_kwh_week, 6)}"
+            )
+        except Exception as e:
+            print(
+                f"⚠️ Failed to update weekly_summary for {appliance_name} ({user_id}): {e}"
+            )
+            continue
 
     print("🎉 Weekly aggregation completed.")
 
@@ -313,7 +420,7 @@ def scheduled_prediction_update():
 
 
 scheduler = BackgroundScheduler()
-# scheduler.add_job(summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
+scheduler.add_job(weekly_summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
 scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
 scheduler.add_job(
     scheduled_prediction_update, "cron", hour=0, minute=20, timezone=PH_TZ
@@ -505,6 +612,77 @@ def get_all_users():
     return users
 
 
+# Add user
+@app.post("/users")
+def add_user(user: User):
+    try:
+        now = datetime.now().strftime("%Y-%m-%d")
+
+        # 1. Create the user in Firebase Authentication
+        firebase_user = auth.create_user(
+            email=user.email,
+            password="WisEnergy2025!",  # 🔐 You may generate a random password or let frontend supply it
+            display_name=f"{user.first_name} {user.last_name}",
+        )
+
+        # 2. Save to Realtime Database under /users
+        ref = db.reference("/users")
+        user_id = firebase_user.uid  # use Firebase Auth UID as ID to avoid mismatches
+
+        payload = {
+            "id": user_id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "location": user.location,
+            "role": user.role,
+            "date_created": now,
+            "date_modified": now,
+        }
+
+        ref.child(user_id).set(payload)
+
+        return {"status": "success", "data": payload}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/users/{user_id}")
+def edit_user(user_id: str, user: User):
+    try:
+        # Check if exists in DB
+        ref = db.reference(f"/users/{user_id}")
+        existing = ref.get()
+        if not existing:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        now = datetime.now().strftime("%Y-%m-%d")
+
+        # 1. Update in Firebase Auth
+        auth.update_user(
+            user_id,
+            email=user.email,
+            display_name=f"{user.first_name} {user.last_name}",
+        )
+
+        # 2. Update in Realtime Database
+        updated_data = {
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "location": user.location,
+            "role": user.role,
+            "date_modified": now,
+        }
+        ref.update(updated_data)
+
+        return {"status": "success", "data": {**existing, **updated_data}}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/reviews")
 def get_reviews():
     reviews_ref = db.reference("/reviews")
@@ -681,7 +859,7 @@ def generate_recommendation(user_data: dict):
         Given the energy consumption data: {json.dumps(user_data)},
         provide a JSON response with:
         1. "peaks": always Identify peak time(), peak kWh and use the appliance name as keys (ignore appliances with no data for today) and dont use device.
-        2. "recommendations": List at least 3 concise recommendations to reduce energy usage (2-3 sentences each) message only no title.
+        2. "recommendations": analyze the usage and List at least 3 concise recommendations to reduce energy usage (2-3 sentences each) message only no title.
         3. "insights": List at least 3 concise analysis base on the usage data (1-2 sentences each) message only no title.
         Ensure recommendations are practical, and avoid mentioning products.
     """
@@ -873,4 +1051,134 @@ def fetch_user_data(user_id: str, date: datetime):
                     "total_kWh": daily_data.get("total_kWh", 0),
                     "updated_at": daily_data.get("updated_at", "No data available"),
                 }
+    return result
+
+
+class AggregationResult(BaseModel):
+    status: str
+    message: str
+    details: list
+
+
+def weekly_summary_aggregation_for_date(target_monday: str) -> AggregationResult:
+    """
+    Aggregate daily_summary into weekly_summary for the previous week (Monday to Sunday)
+    relative to the input Monday date. Always create a weekly_summary entry for each
+    user/device/appliance, even if no daily_summary data exists (total_kWh = 0.0).
+    Args:
+        target_monday (str): Date string (YYYY-MM-DD) representing a Monday.
+    Returns:
+        AggregationResult: Aggregation status and details.
+    """
+    try:
+        # Parse and validate input date
+        target_dt = datetime.strptime(target_monday, "%Y-%m-%d")
+        if target_dt.weekday() != 0:
+            raise ValueError(f"Input date {target_monday} is not a Monday")
+    except ValueError as e:
+        return AggregationResult(status="error", message=str(e), details=[])
+
+    now_ph = datetime.now(PH_TZ)
+    now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Calculate previous week (Monday to Sunday)
+    prev_week_end = target_dt - timedelta(days=1)  # Sunday
+    prev_week_start = prev_week_end - timedelta(days=6)  # Monday
+    y = str(prev_week_start.year)
+    m = f"{prev_week_start.month:02d}"
+    w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
+
+    # Collect all days in last week
+    days = [
+        (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)
+    ]
+
+    result = AggregationResult(
+        status="success", message=f"Aggregating for {days[0]} → {days[-1]}", details=[]
+    )
+
+    # Get all users, devices, and appliances from /appliances or /daily_summary
+    appliances_root = db.reference("/appliances").get() or {}
+    daily_root = db.reference("/daily_summary").get() or {}
+
+    # Combine user/device/appliance combinations
+    combinations = set()
+    for user_id, devices in appliances_root.items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name in appliances.keys():
+                combinations.add((user_id, device_id, appliance_name))
+    for user_id, devices in daily_root.items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name in appliances.keys():
+                combinations.add((user_id, device_id, appliance_name))
+
+    if not combinations:
+        result.status = "error"
+        result.message = "No appliances found for aggregation"
+        return result
+
+    for user_id, device_id, appliance_name in combinations:
+        total_kwh_week = 0.0
+
+        # Sum from daily_summary
+        for d in days:
+            summary = db.reference(
+                f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
+            ).get()
+            if summary:
+                try:
+                    total_kwh_week += float(summary.get("total_kWh", 0.0))
+                except (ValueError, TypeError):
+                    continue
+
+        # Save into weekly_summary, even if total_kWh is 0.0
+        weekly_ref = db.reference(
+            f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+        )
+        try:
+            weekly_ref.set(
+                {
+                    "total_kWh": round(total_kwh_week, 6),
+                    "start_date": prev_week_start.strftime("%Y-%m-%d"),
+                    "end_date": prev_week_end.strftime("%Y-%m-%d"),
+                    "updated_at": now_str,
+                }
+            )
+            result.details.append(
+                {
+                    "user_id": user_id,
+                    "device_id": device_id,
+                    "appliance_name": appliance_name,
+                    "week": f"{y}/{m}/W{w}",
+                    "total_kWh": round(total_kwh_week, 6),
+                    "status": "success",
+                }
+            )
+        except Exception as e:
+            result.details.append(
+                {
+                    "user_id": user_id,
+                    "device_id": device_id,
+                    "appliance_name": appliance_name,
+                    "week": f"{y}/{m}/W{w}",
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
+
+    return result
+
+
+@app.get("/aggregate_weekly/{date}", response_model=AggregationResult)
+async def aggregate_weekly(date: str):
+    """
+    FastAPI endpoint to trigger weekly_summary_aggregation_for_date.
+    Args:
+        date (str): Monday date in YYYY-MM-DD format.
+    Returns:
+        AggregationResult: JSON response with aggregation status and details.
+    """
+    result = weekly_summary_aggregation_for_date(date)
+    if result.status == "error":
+        raise HTTPException(status_code=400, detail=result.message)
     return result

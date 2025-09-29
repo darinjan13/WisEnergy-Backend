@@ -20,9 +20,9 @@ def backfill_single_day_usage(
 ):
     """
     Process a usage.json (time-only -> power) for a single day
-    and push a daily_summary entry to Firebase.
+    and push a daily_summary entry to Firebase, matching hourly_summary_update's avg_power
+    with a realistic updated_at (start of the hour after the last data point).
     """
-
     with open(input_file, "r") as f:
         usage_data = json.load(f)
 
@@ -62,58 +62,113 @@ def backfill_single_day_usage(
         hour_key = t1.strftime("%H:00")
         hourly[hour_key] = hourly.get(hour_key, 0) + kWh
 
-    # Time-weighted daily average power
-    total_hours = (readings[-1][0] - readings[0][0]).total_seconds() / 3600
-    avg_power = (
-        (total_kWh * 1000) / total_hours
-        if total_hours > 0
-        else sum(powers) / len(powers)
-    )
+    # Arithmetic mean of all power readings, matching hourly_summary_update
+    avg_power = sum(powers) / len(powers) if powers else 0
 
-    updated_at = readings[-1][0].strftime("%Y-%m-%d %H:%M:%S")
+    # Realistic updated_at: start of the hour after the last data point
+    last_reading = readings[-1][0]
+    last_hour = last_reading.replace(minute=0, second=0, microsecond=0)
+    next_hour = last_hour + timedelta(hours=1)
+    updated_at = next_hour.strftime("%Y-%m-%d %H:%M:%S")
 
-    summary = {
-        "avg_power": round(avg_power, 2),
-        "hourly": {h: round(v, 6) for h, v in hourly.items()},
-        "max_power": round(max_power, 2),
-        "total_kWh": round(total_kWh, 5),
-        "updated_at": updated_at,
-    }
-
-    # Push to Firebase
+    # Merge with existing hourly data
     ref = db.reference(
         f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
     )
-    ref.set(summary)
+    try:
+        existing = ref.get() or {}
+        existing_hourly = existing.get("hourly", {})
+        hourly.update(existing_hourly)  # Preserve existing hourly data
+        summary = {
+            "avg_power": round(avg_power, 2),
+            "hourly": {h: round(v, 6) for h, v in hourly.items()},
+            "max_power": round(max_power, 2),
+            "total_kWh": round(total_kWh, 5),
+            "updated_at": updated_at,
+        }
+        ref.set(summary)
+        print(f"✅ Backfilled {target_date} for {appliance_name} → {summary}")
 
-    print(f"✅ Backfilled {target_date} for {appliance_name} → {summary}")
-    return summary
+        # Update weekly_summary with consistent updated_at
+        update_weekly_summary_after_backfill(
+            user_id, device_id, appliance_name, target_date, updated_at
+        )
+        return summary
+    except Exception as e:
+        print(f"⚠️ Failed to backfill {target_date} for {appliance_name}: {e}")
+        return None
+
+
+def update_weekly_summary_after_backfill(
+    user_id, device_id, appliance_name, target_date, updated_at
+):
+    t = datetime.strptime(target_date, "%Y-%m-%d")
+    current_day = t.weekday()
+    week_start = t - timedelta(days=current_day)
+    week_end = week_start + timedelta(days=6)
+    y = str(week_start.year)
+    m = f"{week_start.month:02d}"
+    w = f"{((week_start.day - 1) // 7) + 1:02d}"
+
+    daily_ref = db.reference(
+        f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
+    )
+    daily_data = daily_ref.get() or {}
+    total_kwh_day = daily_data.get("total_kWh", 0.0)
+
+    weekly_ref = db.reference(
+        f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+    )
+    try:
+        existing_weekly = weekly_ref.get() or {}
+        existing_kwh = float(existing_weekly.get("total_kWh", 0.0))
+        new_kwh = existing_kwh + total_kwh_day
+
+        weekly_ref.set(
+            {
+                "total_kWh": round(new_kwh, 6),
+                "start_date": week_start.strftime("%Y-%m-%d"),
+                "end_date": min(target_date, week_end.strftime("%Y-%m-%d")),
+                "updated_at": updated_at,  # Use same realistic updated_at
+            }
+        )
+        print(
+            f"📅 Weekly summary updated for {appliance_name}: Week {y}-{m}-W{w}, total_kWh={round(new_kwh, 4)}"
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to update weekly_summary for {appliance_name}: {e}")
 
 
 def backfill_multi_day_usage(input_file, user_id, device_id, appliance_name):
     """
     Process a usage.json with multiple days of data (date -> times -> power)
-    and push daily_summary for each day to Firebase.
+    and push daily_summary for each day to Firebase, matching hourly_summary_update's
+    avg_power and realistic updated_at (start of the hour after the last data point).
     """
-
-    with open(input_file, "r") as f:
-        usage_data = json.load(f)
+    try:
+        with open(input_file, "r") as f:
+            usage_data = json.load(f)
+    except Exception as e:
+        print(f"⚠️ Failed to load {input_file}: {e}")
+        return
 
     for target_date, times in usage_data.items():
         readings = []
         for time_str, record in times.items():
             if "power" not in record:
                 continue
-            t = datetime.strptime(f"{target_date} {time_str}", "%Y-%m-%d %H_%M_%S")
-            readings.append((t, record["power"]))
+            try:
+                t = datetime.strptime(f"{target_date} {time_str}", "%Y-%m-%d %H_%M_%S")
+                readings.append((t, float(record["power"])))
+            except (ValueError, TypeError):
+                continue
 
-        if not readings:
-            print(f"⚠️ Skipped {target_date} (no valid readings)")
+        if len(readings) < 2:
+            print(f"⚠️ Skipped {target_date} (not enough valid readings)")
             continue
 
         readings.sort(key=lambda x: x[0])
         powers = [p for _, p in readings]
-        avg_power = sum(powers) / len(powers)
         max_power = max(powers)
 
         total_kWh = 0.0
@@ -124,31 +179,45 @@ def backfill_multi_day_usage(input_file, user_id, device_id, appliance_name):
             t2, _ = readings[i + 1]
 
             interval_sec = (t2 - t1).total_seconds()
-            interval_hr = interval_sec / 3600
+            if interval_sec <= 0:
+                continue
 
+            interval_hr = interval_sec / 3600
             kWh = (p1 * interval_hr) / 1000
             total_kWh += kWh
 
             hour_key = t1.strftime("%H:00")
             hourly[hour_key] = hourly.get(hour_key, 0) + kWh
 
-        updated_at = readings[-1][0].strftime("%Y-%m-%d %H:%M:%S")
+        # Arithmetic mean of all power readings, matching hourly_summary_update
+        avg_power = sum(powers) / len(powers) if powers else 0
 
-        summary = {
-            "avg_power": round(avg_power, 2),
-            "hourly": {h: round(v, 6) for h, v in hourly.items()},
-            "max_power": round(max_power, 2),
-            "total_kWh": round(total_kWh, 5),
-            "updated_at": updated_at,
-        }
+        # Realistic updated_at: start of the hour after the last data point
+        last_reading = readings[-1][0]
+        last_hour = last_reading.replace(minute=0, second=0, microsecond=0)
+        next_hour = last_hour + timedelta(hours=1)
+        updated_at = next_hour.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Push to Firebase
+        # Merge with existing hourly data
         ref = db.reference(
             f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{target_date}"
         )
-        ref.set(summary)
-
-        print(f"✅ Backfilled {target_date} for {appliance_name} → {summary}")
+        try:
+            existing = ref.get() or {}
+            existing_hourly = existing.get("hourly", {})
+            hourly.update(existing_hourly)  # Preserve existing hourly data
+            summary = {
+                "avg_power": round(avg_power, 2),
+                "hourly": {h: round(v, 6) for h, v in hourly.items()},
+                "max_power": round(max_power, 2),
+                "total_kWh": round(total_kWh, 5),
+                "updated_at": updated_at,
+            }
+            ref.set(summary)
+            print(f"✅ Backfilled {target_date} for {appliance_name} → {summary}")
+        except Exception as e:
+            print(f"⚠️ Failed to backfill {target_date} for {appliance_name}: {e}")
+            continue
 
     print("🎉 Backfill complete.")
 
@@ -635,19 +704,19 @@ if __name__ == "__main__":
     #     device_id="d8bc24124b00",
     #     appliance_name="Fridge",
     # )
-    backfill_predictions_from_exports(
-        daily_export_file="files/daily_summary.json",
-        weekly_export_file="files/weekly_summary.json",
-        min_days=7,  # require at least 7 past days to start predicting
-        min_weeks=4,  # require at least 4 past weeks to start predicting
-        write_to_firebase=True,
-    )
+    # backfill_predictions_from_exports(
+    #     daily_export_file="files/daily_summary.json",
+    #     weekly_export_file="files/weekly_summary.json",
+    #     min_days=7,  # require at least 7 past days to start predicting
+    #     min_weeks=4,  # require at least 4 past weeks to start predicting
+    #     write_to_firebase=True,
+    # )
     # preds = backfill_predictions("files/daily_summary.json")
     # pprint.pprint(preds)
     # backfill_weekly_from_export("files/all_daily_summary.json")
-    # backfill_multi_day_usage(
-    #     input_file="usage1.json",  # your file with {"2025-08-01": {...}, "2025-08-02": {...}}
-    #     user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
-    #     device_id="d8bc24124b00",
-    #     appliance_name="Fan",
-    # )
+    backfill_multi_day_usage(
+        input_file="files/fridge_usage.json",  # your file with {"2025-08-01": {...}, "2025-08-02": {...}}
+        user_id="tVD45VkzSUhwDwpa3yRES71Wxar2",
+        device_id="d8bc24124b00",
+        appliance_name="Fridge",
+    )
