@@ -223,7 +223,7 @@ def hourly_summary_update():
             uid=user_id,
             title="WisEnergy Update ⚡",
             body=f"Your energy summary for {today} {hour_key} is updated.",
-            data={"screen": "dashboard", "date": today, "hour": hour_key}
+            data={"screen": "dashboard", "date": today, "hour": hour_key},
         )
 
     print("🎉 Hourly and weekly summary update completed.")
@@ -1065,11 +1065,13 @@ def fetch_user_data(user_id: str, date: datetime):
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
+
 class PushPayload(BaseModel):
-    uid: str        # 👈 which user to notify
+    uid: str  # 👈 which user to notify
     title: str
     body: str
     data: dict | None = None
+
 
 @app.post("/send-notification/")
 async def send_notification(payload: PushPayload):
@@ -1089,7 +1091,7 @@ async def send_notification(payload: PushPayload):
             "sound": "default",
             "title": payload.title,
             "body": payload.body,
-            "data": payload.data or {}
+            "data": payload.data or {},
         }
 
         try:
@@ -1109,22 +1111,44 @@ async def send_notification(payload: PushPayload):
 
     return {"results": results}
 
-# def notify_user(uid: str, title: str, body: str, data: dict | None = None):
-#     token = tokens_db.get(uid)
-#     if not token:
-#         print(f"⚠️ No push token registered for {uid}")
-#         return
 
-#     message = {
-#         "to": token,
-#         "sound": "default",
-#         "title": title,
-#         "body": body,
-#         "data": data or {}
-#     }
+def notify_user(uid: str, title: str, body: str, data: dict | None = None):
+    tokens_ref = db.reference(f"/tokens/{uid}")
+    tokens = tokens_ref.get()
 
-#     try:
-#         response = requests.post(EXPO_PUSH_URL, json=message)
-#         print(f"📩 Notification sent to {uid}: {response.json()}")
-#     except Exception as e:
-#         print(f"❌ Failed to send notification to {uid}: {e}")
+    if not tokens:
+        print(f"⚠️ No push tokens registered for {uid}")
+        return
+
+    if not isinstance(tokens, list):
+        tokens = [tokens]  # handle case where it's not a list
+
+    results = []
+    for token in tokens:
+        message = {
+            "to": token,
+            "sound": "default",
+            "title": title,
+            "body": body,
+            "data": data or {},
+        }
+
+        try:
+            response = requests.post(EXPO_PUSH_URL, json=message)
+            res_json = response.json()
+            results.append({"token": token, "response": res_json})
+
+            # Auto-clean invalid tokens
+            if res_json.get("data", {}).get("status") == "error":
+                error_type = res_json["data"].get("details", {}).get("error")
+                if error_type == "DeviceNotRegistered":
+                    tokens_ref.set([t for t in tokens if t != token])
+                    print(f"❌ Removed invalid token: {token}")
+
+            print(f"📩 Notification sent to {uid}: {res_json}")
+
+        except Exception as e:
+            print(f"❌ Failed to send notification to {uid}: {e}")
+            results.append({"token": token, "error": str(e)})
+
+    return results
