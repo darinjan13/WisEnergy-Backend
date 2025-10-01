@@ -3,6 +3,7 @@ import random
 import pandas as pd
 import json
 import re
+import requests
 
 from google import genai
 from sendgrid import SendGridAPIClient
@@ -216,6 +217,14 @@ def hourly_summary_update():
                     print(
                         f"⚠️ Failed to update weekly_summary for {appliance_name}: {e}"
                     )
+
+    for user_id in users:
+        notify_user(
+            uid=user_id,
+            title="WisEnergy Update ⚡",
+            body=f"Your energy summary for {today} {hour_key} is updated.",
+            data={"screen": "dashboard", "date": today, "hour": hour_key}
+        )
 
     print("🎉 Hourly and weekly summary update completed.")
 
@@ -1054,131 +1063,68 @@ def fetch_user_data(user_id: str, date: datetime):
     return result
 
 
-class AggregationResult(BaseModel):
-    status: str
-    message: str
-    details: list
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
+class PushPayload(BaseModel):
+    uid: str        # 👈 which user to notify
+    title: str
+    body: str
+    data: dict | None = None
 
-def weekly_summary_aggregation_for_date(target_monday: str) -> AggregationResult:
-    """
-    Aggregate daily_summary into weekly_summary for the previous week (Monday to Sunday)
-    relative to the input Monday date. Always create a weekly_summary entry for each
-    user/device/appliance, even if no daily_summary data exists (total_kWh = 0.0).
-    Args:
-        target_monday (str): Date string (YYYY-MM-DD) representing a Monday.
-    Returns:
-        AggregationResult: Aggregation status and details.
-    """
-    try:
-        # Parse and validate input date
-        target_dt = datetime.strptime(target_monday, "%Y-%m-%d")
-        if target_dt.weekday() != 0:
-            raise ValueError(f"Input date {target_monday} is not a Monday")
-    except ValueError as e:
-        return AggregationResult(status="error", message=str(e), details=[])
+@app.post("/send-notification/")
+async def send_notification(payload: PushPayload):
+    # 1. Fetch tokens from Firebase
+    tokens_ref = db.reference(f"/tokens/{payload.uid}")
+    tokens = tokens_ref.get()
 
-    now_ph = datetime.now(PH_TZ)
-    now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
+    if not tokens:
+        raise HTTPException(status_code=404, detail="No tokens found for this user")
 
-    # Calculate previous week (Monday to Sunday)
-    prev_week_end = target_dt - timedelta(days=1)  # Sunday
-    prev_week_start = prev_week_end - timedelta(days=6)  # Monday
-    y = str(prev_week_start.year)
-    m = f"{prev_week_start.month:02d}"
-    w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
+    results = []
 
-    # Collect all days in last week
-    days = [
-        (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)
-    ]
+    # 2. Loop through all tokens
+    for token in tokens:
+        message = {
+            "to": token,
+            "sound": "default",
+            "title": payload.title,
+            "body": payload.body,
+            "data": payload.data or {}
+        }
 
-    result = AggregationResult(
-        status="success", message=f"Aggregating for {days[0]} → {days[-1]}", details=[]
-    )
-
-    # Get all users, devices, and appliances from /appliances or /daily_summary
-    appliances_root = db.reference("/appliances").get() or {}
-    daily_root = db.reference("/daily_summary").get() or {}
-
-    # Combine user/device/appliance combinations
-    combinations = set()
-    for user_id, devices in appliances_root.items():
-        for device_id, appliances in (devices or {}).items():
-            for appliance_name in appliances.keys():
-                combinations.add((user_id, device_id, appliance_name))
-    for user_id, devices in daily_root.items():
-        for device_id, appliances in (devices or {}).items():
-            for appliance_name in appliances.keys():
-                combinations.add((user_id, device_id, appliance_name))
-
-    if not combinations:
-        result.status = "error"
-        result.message = "No appliances found for aggregation"
-        return result
-
-    for user_id, device_id, appliance_name in combinations:
-        total_kwh_week = 0.0
-
-        # Sum from daily_summary
-        for d in days:
-            summary = db.reference(
-                f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
-            ).get()
-            if summary:
-                try:
-                    total_kwh_week += float(summary.get("total_kWh", 0.0))
-                except (ValueError, TypeError):
-                    continue
-
-        # Save into weekly_summary, even if total_kWh is 0.0
-        weekly_ref = db.reference(
-            f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
-        )
         try:
-            weekly_ref.set(
-                {
-                    "total_kWh": round(total_kwh_week, 6),
-                    "start_date": prev_week_start.strftime("%Y-%m-%d"),
-                    "end_date": prev_week_end.strftime("%Y-%m-%d"),
-                    "updated_at": now_str,
-                }
-            )
-            result.details.append(
-                {
-                    "user_id": user_id,
-                    "device_id": device_id,
-                    "appliance_name": appliance_name,
-                    "week": f"{y}/{m}/W{w}",
-                    "total_kWh": round(total_kwh_week, 6),
-                    "status": "success",
-                }
-            )
+            response = requests.post(EXPO_PUSH_URL, json=message)
+            res_json = response.json()
+            results.append({"token": token, "expo_response": res_json})
+
+            # 3. If token is invalid, remove it from Firebase
+            if res_json.get("data", {}).get("status") == "error":
+                error_type = res_json["data"].get("details", {}).get("error")
+                if error_type == "DeviceNotRegistered":
+                    tokens_ref.set([t for t in tokens if t != token])
+                    print(f"❌ Removed invalid token: {token}")
+
         except Exception as e:
-            result.details.append(
-                {
-                    "user_id": user_id,
-                    "device_id": device_id,
-                    "appliance_name": appliance_name,
-                    "week": f"{y}/{m}/W{w}",
-                    "status": "error",
-                    "error": str(e),
-                }
-            )
+            results.append({"token": token, "error": str(e)})
 
-    return result
+    return {"results": results}
 
+# def notify_user(uid: str, title: str, body: str, data: dict | None = None):
+#     token = tokens_db.get(uid)
+#     if not token:
+#         print(f"⚠️ No push token registered for {uid}")
+#         return
 
-@app.get("/aggregate_weekly/{date}", response_model=AggregationResult)
-async def aggregate_weekly(date: str):
-    """
-    FastAPI endpoint to trigger weekly_summary_aggregation_for_date.
-    Args:
-        date (str): Monday date in YYYY-MM-DD format.
-    Returns:
-        AggregationResult: JSON response with aggregation status and details.
-    """
-    result = weekly_summary_aggregation_for_date(date)
-    if result.status == "error":
-        raise HTTPException(status_code=400, detail=result.message)
-    return result
+#     message = {
+#         "to": token,
+#         "sound": "default",
+#         "title": title,
+#         "body": body,
+#         "data": data or {}
+#     }
+
+#     try:
+#         response = requests.post(EXPO_PUSH_URL, json=message)
+#         print(f"📩 Notification sent to {uid}: {response.json()}")
+#     except Exception as e:
+#         print(f"❌ Failed to send notification to {uid}: {e}")
