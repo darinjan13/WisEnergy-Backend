@@ -5,6 +5,55 @@ from ..utils.timezone import PH_TZ
 from ..utils.firebase import db
 
 
+def scheduled_prediction_update():
+    now = datetime.now(PH_TZ)
+    today = now.strftime("%Y-%m-%d")
+    week_key = now.strftime("%Y-W%U")
+
+    print(f"🔮 Running scheduled prediction update for {today} / {week_key}...")
+
+    daily_root = db.reference("/daily_summary").get() or {}
+    for user_id, devices in daily_root.items():
+        for device_id, appliances in (devices or {}).items():
+            for appliance_name in (appliances or {}).keys():
+                # ---- Daily Prediction ----
+                daily_pred = appliance_daily_prediction(
+                    user_id, device_id, appliance_name
+                )
+                if daily_pred:
+                    db.reference(
+                        f"/predictions/{user_id}/{device_id}/{appliance_name}/daily/{today}"
+                    ).set(
+                        {
+                            "predicted_kWh": daily_pred,
+                            "timestamp": now.isoformat(),
+                            "model": "Prophet",
+                            "horizon": "D0",
+                        }
+                    )
+                    print(f"✅ Daily prediction stored for {appliance_name} ({today})")
+
+                # ---- Weekly Prediction (only on Mondays) ----
+                if now.weekday() == 0:  # Monday
+                    weekly_pred = appliance_weekly_prediction(
+                        user_id, device_id, appliance_name
+                    )
+                    if weekly_pred:
+                        db.reference(
+                            f"/predictions/{user_id}/{device_id}/{appliance_name}/weekly/{week_key}"
+                        ).set(
+                            {
+                                "predicted_kWh": weekly_pred,
+                                "timestamp": now.isoformat(),
+                                "model": "Prophet",
+                                "horizon": "W0",
+                            }
+                        )
+                        print(
+                            f"✅ Weekly prediction stored for {appliance_name} ({week_key})"
+                        )
+
+
 def appliance_daily_prediction(user_id, device_id, appliance_name):
     MIN_DAYS = 7
     daily_ref = db.reference(f"/daily_summary/{user_id}/{device_id}/{appliance_name}")
