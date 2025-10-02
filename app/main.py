@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
@@ -17,6 +17,7 @@ from .routes import (
     auth,
     recommendations,
     notifications,
+    predictions,
 )
 
 app = FastAPI()
@@ -39,11 +40,19 @@ app.include_router(feedback.router)
 app.include_router(auth.router)
 app.include_router(recommendations.router)
 app.include_router(notifications.router)
+app.include_router(predictions.router)
 
 
 @app.get("/")
 def root():
     return {"message": "WisEnergy API running"}
+
+
+@app.api_route("/ping", methods=["GET", "HEAD"])
+def ping(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    return {"message": "pong"}
 
 
 # Scheduler
