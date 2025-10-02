@@ -9,7 +9,7 @@ from ..services.predictions import (
 router = APIRouter()
 
 
-@router.get("/{user_id}/{device_id}/{appliance_name}")
+@router.get("/predict/{user_id}/{device_id}/{appliance_name}")
 def predict_and_return_history(user_id: str, device_id: str, appliance_name: str):
     try:
         today = datetime.now().date()
