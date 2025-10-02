@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
 from ..utils.firebase import db
-from ..models import FeedbackStatusUpdate
+from ..models.feedback_models import FeedbackStatusUpdate
 
 router = APIRouter()
 

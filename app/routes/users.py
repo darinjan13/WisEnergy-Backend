@@ -3,7 +3,7 @@ from typing import List
 from firebase_admin import auth
 from datetime import datetime
 from ..utils.firebase import db
-from ..models import User
+from ..models.user_models import User
 
 router = APIRouter()
 

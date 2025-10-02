@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 import requests
-from ..models import PushPayload
+from ..models.feedback_models import PushPayload
 from ..utils.firebase import db
 
 router = APIRouter()

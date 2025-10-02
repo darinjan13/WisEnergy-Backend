@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from firebase_admin import auth
-from ..models import PasswordResetRequest, OTPRequest
+from ..models.user_models import PasswordResetRequest, OTPRequest
 from ..services.otp import generate_otp_code, send_otp_email, save_otp
 
 router = APIRouter()
