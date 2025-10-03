@@ -6,20 +6,22 @@ from .notifications import notify_user
 
 def hourly_summary_update():
     now_ph = datetime.now(PH_TZ)
-    # Process the previous hour
     prev_hour = now_ph - timedelta(hours=1)
-    today = prev_hour.strftime(
-        "%Y-%m-%d"
-    )  # Previous hour’s date, e.g., "2025-09-30" at 00:00
-    hour_key = prev_hour.strftime("%H:00")  # e.g., "23:00" at 00:00
+    today = prev_hour.strftime("%Y-%m-%d")
+    hour_key = prev_hour.strftime("%H:00")
 
-    # Determine week based on previous hour (Monday to Sunday)
+    # Week bucket
     current_day = prev_hour.weekday()
-    week_start = prev_hour - timedelta(days=current_day)  # Monday of this week
-    week_end = week_start + timedelta(days=6)  # Sunday of this week
+    week_start = prev_hour - timedelta(days=current_day)
+    week_end = week_start + timedelta(days=6)
     y = str(week_start.year)
     m = f"{week_start.month:02d}"
     w = f"{((week_start.day - 1) // 7) + 1:02d}"
+
+    # Month bucket
+    month_start = prev_hour.replace(day=1)
+    y_month = str(month_start.year)
+    m_month = f"{month_start.month:02d}"
 
     print(f"📊 Running hourly summary update for {today} {hour_key}...")
 
@@ -42,7 +44,7 @@ def hourly_summary_update():
                     or {}
                 )
 
-                # Collect powers + timestamps for the previous hour
+                # Collect powers + timestamps for prev hour
                 records = []
                 for ts, rec in day_data.items():
                     try:
@@ -54,13 +56,12 @@ def hourly_summary_update():
                         continue
 
                 if len(records) < 2:
-                    continue  # Need at least 2 points for intervals
+                    continue
 
                 records.sort(key=lambda x: x[0])
                 total_kwh_hour = 0.0
                 powers = []
 
-                # Calculate energy by actual intervals
                 for i in range(len(records) - 1):
                     t1, p1 = records[i]
                     t2, _ = records[i + 1]
@@ -70,34 +71,29 @@ def hourly_summary_update():
 
                 max_power_hour = max(powers)
 
+                # --- DAILY SUMMARY ---
                 daily_ref = db.reference(
                     f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{today}"
                 )
                 existing = daily_ref.get() or {}
 
-                # Prevent double-counting if hour already processed
                 hourly_ref = daily_ref.child("hourly")
                 all_hourly = hourly_ref.get() or {}
                 if hour_key in all_hourly and all_hourly[hour_key] == round(
                     total_kwh_hour, 6
                 ):
-                    print(
-                        f"ℹ️ Skipping update for {appliance_name}: Hour {hour_key} already processed"
-                    )
+                    print(f"ℹ️ Skipping {appliance_name} {hour_key}, already processed.")
                     continue
 
-                # Update hourly bucket
                 try:
                     hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
                 except Exception as e:
-                    print(f"⚠️ Failed to update hourly data for {appliance_name}: {e}")
+                    print(f"⚠️ Failed hourly update {appliance_name}: {e}")
                     continue
 
-                # Recompute daily totals
                 all_hourly = hourly_ref.get() or {}
                 new_total = sum(all_hourly.values())
 
-                # Daily average power across all day's readings
                 all_powers = [float(r.get("power", 0)) for r in day_data.values()]
                 avg_power_day = sum(all_powers) / len(all_powers) if all_powers else 0
 
@@ -113,15 +109,14 @@ def hourly_summary_update():
                         }
                     )
                 except Exception as e:
-                    print(f"⚠️ Failed to update daily_summary for {appliance_name}: {e}")
+                    print(f"⚠️ Failed daily_summary {appliance_name}: {e}")
                     continue
 
                 print(
-                    f"✅ {appliance_name} {today} {hour_key}: "
-                    f"{len(records)} pts, avg={round(avg_power_day,1)}W, kWh={round(total_kwh_hour,4)}"
+                    f"✅ {appliance_name} {today} {hour_key}: kWh={round(total_kwh_hour,4)}"
                 )
 
-                # Update weekly_summary
+                # --- WEEKLY SUMMARY ---
                 weekly_ref = db.reference(
                     f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
                 )
@@ -129,8 +124,6 @@ def hourly_summary_update():
                     existing_weekly = weekly_ref.get() or {}
                     existing_kwh = float(existing_weekly.get("total_kWh", 0.0))
                     new_kwh = existing_kwh + total_kwh_hour
-
-                    # Cap end_date at week_end (Sunday)
                     end_date = min(today, week_end.strftime("%Y-%m-%d"))
 
                     weekly_ref.set(
@@ -141,25 +134,59 @@ def hourly_summary_update():
                             "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
                         }
                     )
+                except Exception as e:
+                    print(f"⚠️ Failed weekly_summary {appliance_name}: {e}")
 
-                    print(
-                        f"📅 Weekly summary updated for {appliance_name} ({user_id}): "
-                        f"Week {y}-{m}-W{w}, total_kWh={round(new_kwh, 4)}, start_date={week_start.strftime('%Y-%m-%d')}, end_date={end_date}"
+                # --- MONTHLY SUMMARY ---
+                monthly_ref = db.reference(
+                    f"/monthly_summary/{user_id}/{device_id}/{appliance_name}/{y_month}/{m_month}"
+                )
+                try:
+                    existing_monthly = monthly_ref.get() or {}
+                    existing_kwh = float(existing_monthly.get("total_kWh", 0.0))
+                    new_monthly_kwh = round(existing_kwh + total_kwh_hour, 6)
+
+                    # Approximate end of month
+                    next_month = month_start.replace(day=28) + timedelta(days=4)
+                    month_end = (next_month - timedelta(days=next_month.day)).strftime(
+                        "%Y-%m-%d"
+                    )
+
+                    monthly_ref.set(
+                        {
+                            "total_kWh": new_monthly_kwh,
+                            "start_date": month_start.strftime("%Y-%m-%d"),
+                            "end_date": month_end,
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
                     )
                 except Exception as e:
-                    print(
-                        f"⚠️ Failed to update weekly_summary for {appliance_name}: {e}"
+                    print(f"⚠️ Failed monthly_summary {appliance_name}: {e}")
+
+                # --- APPLIANCE latest_kwh ---
+                appliance_ref = db.reference(
+                    f"/appliances/{user_id}/{device_id}/{appliance_name}"
+                )
+                try:
+                    appliance_data = appliance_ref.get() or {}
+                    prev_total = float(appliance_data.get("latest_kwh", 0.0))
+                    appliance_ref.update(
+                        {"latest_kwh": round(prev_total + total_kwh_hour, 6)}
                     )
+                except Exception as e:
+                    print(f"⚠️ Failed latest_kwh update {appliance_name}: {e}")
+    should_notify = (prev_hour.hour % 4) == 0
+    # Notify all users
+    if should_notify:
+        for user_id in users:
+            notify_user(
+                uid=user_id,
+                title="WisEnergy Update ⚡",
+                body=f"Your energy summary for {today} {hour_key} is updated.",
+                data={"screen": "dashboard", "date": today, "hour": hour_key},
+            )
 
-    for user_id in users:
-        notify_user(
-            uid=user_id,
-            title="WisEnergy Update ⚡",
-            body=f"Your energy summary for {today} {hour_key} is updated.",
-            data={"screen": "dashboard", "date": today, "hour": hour_key},
-        )
-
-    print("🎉 Hourly and weekly summary update completed.")
+    print("🎉 Hourly, weekly, monthly, and latest_kwh update completed.")
 
 
 def weekly_summary_aggregation():
@@ -305,7 +332,10 @@ def total_energy_consumption():
                         user_total += float(bucket.get("total_kWh", 0.0))
 
             db.reference(f"/weekly_total_consumption/{user_id}/{yw}/{mw}/{ww}").set(
-                {"total_energy_consumption": round(user_total, 2)}
+                {
+                    "total_energy_consumption": round(user_total, 2),
+                    "updated_at": now_str,
+                }
             )
 
     print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")

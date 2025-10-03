@@ -10,9 +10,10 @@ def generate_recommendation(user_data: dict):
     prompt = f"""
         Given the energy consumption data: {json.dumps(user_data)},
         provide a JSON response with:
-        1. "peaks": Identify peak time, peak kWh per appliance.
-        2. "recommendations": at least 3 practical tips.
-        3. "insights": at least 3 concise insights.
+        1. "peaks": always Identify peak time(), peak kWh and use the appliance name as keys (ignore appliances with no data for today) and dont use device.
+        2. "recommendations": analyze the usage and List at least 3 concise recommendations to reduce energy usage (2-3 sentences each) message only no title.
+        3. "insights": List at least 3 concise analysis base on the usage data (1-2 sentences each) message only no title.
+        Ensure recommendations are practical, and avoid mentioning products.
     """
     try:
         response = client_gemini.models.generate_content(

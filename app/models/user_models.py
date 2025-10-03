@@ -6,6 +6,11 @@ class OTPRequest(BaseModel):
     userVerification: bool
 
 
+class OTPRequestWithCode(BaseModel):
+    email: EmailStr
+    code: str
+
+
 class PasswordResetRequest(BaseModel):
     email: str
     new_password: str

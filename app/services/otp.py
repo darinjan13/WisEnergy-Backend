@@ -47,5 +47,5 @@ def save_otp(email: str, otp: str):
     expires = datetime.utcnow() + timedelta(minutes=5)
     email_id = email.replace(".", "_")
     fs.collection("otp-verification").document(email_id).set(
-        {"otp": otp, "expires_at": expires.isoformat(), "verified": False}
+        {"otp": otp, "expires_at": expires.isoformat()}
     )
