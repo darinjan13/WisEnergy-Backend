@@ -179,13 +179,19 @@ def hourly_summary_update():
     # Notify all users
     if should_notify:
         for user_id in users:
+            title = "WisEnergy Update ⚡"
+            body = f"Your energy summary for {today} {hour_key} is updated."
+
+            # send push
             notify_user(
                 uid=user_id,
-                title="WisEnergy Update ⚡",
-                body=f"Your energy summary for {today} {hour_key} is updated.",
+                title=title,
+                body=body,
                 data={"screen": "dashboard", "date": today, "hour": hour_key},
             )
 
+            # save notification record
+            save_notification(user_id, title, body)
     print("🎉 Hourly, weekly, monthly, and latest_kwh update completed.")
 
 
@@ -339,3 +345,19 @@ def total_energy_consumption():
             )
 
     print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")
+
+
+def save_notification(user_id, title, message):
+    try:
+        notif_ref = db.reference(f"/notifications/{user_id}")
+        notif_ref.push(
+            {
+                "title": title,
+                "message": message,
+                "created_at": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                "read_at": None,
+            }
+        )
+        print(f"💾 Notification saved for {user_id}")
+    except Exception as e:
+        print(f"⚠️ Failed to save notification for {user_id}: {e}")
