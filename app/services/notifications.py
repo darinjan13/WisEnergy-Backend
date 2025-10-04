@@ -1,6 +1,8 @@
 import requests
 from fastapi import HTTPException
 from ..utils.firebase import db
+from datetime import datetime, timedelta
+from ..utils.timezone import PH_TZ
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
@@ -42,3 +44,20 @@ def notify_user(uid: str, title: str, body: str, data: dict | None = None):
                 "data": data or {},
             },
         )
+
+
+def save_notification(user_id, title, message, ntype="system"):
+    try:
+        notif_ref = db.reference(f"/notifications/{user_id}")
+        notif_ref.push(
+            {
+                "title": title,
+                "message": message,
+                "type": ntype,
+                "created_at": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                "read_at": None,
+            }
+        )
+        print(f"💾 Notification saved for {user_id}")
+    except Exception as e:
+        print(f"⚠️ Failed to save notification for {user_id}: {e}")

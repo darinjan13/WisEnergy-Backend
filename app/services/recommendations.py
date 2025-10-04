@@ -1,9 +1,49 @@
 import json, re
 from fastapi import HTTPException
-from datetime import datetime, timedelta
+from datetime import datetime
 from ..config import client_gemini
 from ..utils.firebase import db
-from ..utils.timezone import PH_TZ
+
+
+def generate_4hour_recommendation(user_data: dict):
+    prompt = f"""
+        Given the energy consumption data for the last 4 hours: {json.dumps(user_data)},
+        provide a JSON response with:
+        1. "peaks": Identify the peak time and peak kWh for each appliance (ignore appliances with no data in this period). Use appliance names as keys and return a single peak per appliance in the format {{"hour": "HH:00", "kWh": float}}. Do not use device IDs.
+        2. "recommendations": Analyze the usage and provide exactly 1 concise recommendation to reduce energy usage (message only, no title, avoid product mentions).
+        3. "insights": Provide exactly 1 concise analysis based on the usage data (message only, no title).
+        Ensure recommendations are practical and avoid mentioning products.
+    """
+    try:
+        response = client_gemini.models.generate_content(
+            model="gemini-2.5-flash-light",
+            contents=prompt,
+        )
+        cleaned_response = re.sub(r"^```json\n|```$", "", response.text).strip()
+        print(cleaned_response)
+        data = json.loads(cleaned_response)
+
+        if "peaks" in data and isinstance(data["peaks"], dict):
+            formatted = []
+            for appliance, peak in data["peaks"].items():
+                formatted.append(
+                    {
+                        "appliance": appliance,
+                        "hour": peak.get("peak_time")
+                        or peak.get("hour")
+                        or peak.get("peak_hour"),
+                        "kWh": peak.get("peak_kWh")
+                        or peak.get("peak_kwh")
+                        or peak.get("kWh")
+                        or peak.get("kwh"),
+                    }
+                )
+            data["peaks"] = formatted
+        print(data)
+        return data
+    except Exception as e:
+        print(f"Error with Gemini: {e}")
+        return {"peaks": [], "recommendations": [], "insights": []}
 
 
 def generate_recommendation(user_data: dict):

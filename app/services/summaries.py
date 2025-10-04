@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 from ..utils.firebase import db
 from ..utils.timezone import PH_TZ
-from .notifications import notify_user
+from .notifications import notify_user, save_notification
+from .recommendations import generate_4hour_recommendation
 
 
 def hourly_summary_update():
@@ -175,23 +176,110 @@ def hourly_summary_update():
                     )
                 except Exception as e:
                     print(f"⚠️ Failed latest_kwh update {appliance_name}: {e}")
-    should_notify = (prev_hour.hour % 4) == 0
-    # Notify all users
-    if should_notify:
-        for user_id in users:
-            title = "WisEnergy Update ⚡"
-            body = f"Your energy summary for {today} {hour_key} is updated."
 
-            # send push
+    should_notify = (now_ph.hour % 4) == 0
+    if should_notify:
+        label_hour = now_ph.strftime("%H:00")
+
+        for user_id in users:
+            notif_ref = db.reference(f"/notifications/{user_id}")
+            user_notifs = (
+                notif_ref.order_by_child("created_at").limit_to_last(1).get() or {}
+            )
+
+            # check if already notified for this 4-hour slot
+            already_notified = False
+            for _, last_notif in user_notifs.items():
+                if (
+                    "created_at" in last_notif
+                    and last_notif["created_at"][:13]
+                    == now_ph.strftime("%Y-%m-%d %H")[:13]
+                    and last_notif.get("type") == "ai_insight"
+                ):
+                    already_notified = True
+                    break
+
+            if already_notified:
+                print(
+                    f"ℹ️ Skipping user {user_id} — already notified for this 4-hour slot."
+                )
+                continue
+
+            # Collect last 4 hours data
+            last_4_hours = []
+            for j in range(4):
+                h_dt = prev_hour - timedelta(hours=j)
+                day_str = h_dt.strftime("%Y-%m-%d")
+                h_key = h_dt.strftime("%H:00")
+                last_4_hours.append((day_str, h_key))
+
+            user_data = {}
+            devices = db.reference(f"/usage/{user_id}").get(shallow=True) or {}
+            for device_id in devices:
+                appliances = (
+                    db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True)
+                    or {}
+                )
+                for appliance_name in appliances:
+                    if appliance_name not in user_data:
+                        user_data[appliance_name] = {"hourly": {}}
+                    for day_str, h_key in last_4_hours:
+                        daily_ref = db.reference(
+                            f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{day_str}"
+                        )
+                        kwh = daily_ref.child("hourly").child(h_key).get()
+                        if kwh is not None:
+                            user_data[appliance_name]["hourly"][h_key] = float(kwh)
+
+            # Generate AI recommendations
+            ai_data = generate_4hour_recommendation(user_data)
+            peaks_str = (
+                " ".join(
+                    [
+                        f"- {p['appliance']}: {p['kWh']} kWh at {p['hour']}"
+                        for p in ai_data.get("peaks", [])
+                    ]
+                )
+                or "No peaks identified."
+            )
+
+            insights_str = ai_data.get("insights") or "No insights available."
+            recs_str = ai_data.get("recommendations") or "No recommendations available."
+
+            title = "WisEnergy Update ⚡"
+            push_body = "Your 4-hour summary is ready. Peaks, insights, and recommendations updated."
+            window_start = (now_ph - timedelta(hours=4)).strftime(
+                "%I:%M %p"
+            )  # e.g. 12:00 AM
+            window_end = now_ph.strftime("%I:%M %p")  # e.g. 04:00 AM
+            label_range = f"{window_start} - {window_end}"
+            message = (
+                f"Your energy summary for the last 4 hours ({label_range}) is updated.\n\n"
+                f"Peak Usages: {peaks_str}\n"
+                f"Insights: {insights_str}\n"
+                f"Recommendations: {recs_str}"
+            )
+
+            # Send push
             notify_user(
                 uid=user_id,
                 title=title,
-                body=body,
-                data={"screen": "dashboard", "date": today, "hour": hour_key},
+                body=push_body,
+                data={"screen": "notifications", "date": today, "hour": label_hour},
             )
 
-            # save notification record
-            save_notification(user_id, title, body)
+            # Save to notifications node
+            notif_ref.push(
+                {
+                    "title": title,
+                    "message": message,
+                    "type": "ai_insight",
+                    "created_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                    "read_at": None,
+                }
+            )
+            print(f"💾 Notification saved for {user_id}")
+
     print("🎉 Hourly, weekly, monthly, and latest_kwh update completed.")
 
 
@@ -345,19 +433,3 @@ def total_energy_consumption():
             )
 
     print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")
-
-
-def save_notification(user_id, title, message):
-    try:
-        notif_ref = db.reference(f"/notifications/{user_id}")
-        notif_ref.push(
-            {
-                "title": title,
-                "message": message,
-                "created_at": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-                "read_at": None,
-            }
-        )
-        print(f"💾 Notification saved for {user_id}")
-    except Exception as e:
-        print(f"⚠️ Failed to save notification for {user_id}: {e}")
