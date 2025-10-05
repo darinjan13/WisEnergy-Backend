@@ -38,7 +38,6 @@ app.include_router(devices.router)
 app.include_router(reviews.router)
 app.include_router(feedback.router)
 app.include_router(auth.router)
-app.include_router(recommendations.router)
 app.include_router(notifications.router)
 app.include_router(predictions.router)
 
