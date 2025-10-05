@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
 from .utils.timezone import PH_TZ
 from .services.summaries import (
     hourly_summary_update,
@@ -15,7 +14,6 @@ from .routes import (
     reviews,
     feedback,
     auth,
-    recommendations,
     notifications,
     predictions,
 )
