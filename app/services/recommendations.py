@@ -16,7 +16,7 @@ def generate_4hour_recommendation(user_data: dict):
     """
     try:
         response = client_gemini.models.generate_content(
-            model="gemini-2.5-flash-light",
+            model="gemini-2.5-flash-lite",
             contents=prompt,
         )
         cleaned_response = re.sub(r"^```json\n|```$", "", response.text).strip()

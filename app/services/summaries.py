@@ -72,7 +72,6 @@ def hourly_summary_update():
 
                 max_power_hour = max(powers)
 
-                # --- DAILY SUMMARY ---
                 daily_ref = db.reference(
                     f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{today}"
                 )
