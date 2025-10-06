@@ -8,9 +8,13 @@ from ..utils.firebase import db
 def scheduled_prediction_update():
     now = datetime.now(PH_TZ)
     today = now.strftime("%Y-%m-%d")
-    week_key = now.strftime("%Y-W%U")
+    year = now.strftime("%Y")  # Extract year (e.g., "2025")
+    month = now.strftime("%m")  # Extract month (e.g., "10")
+    week = f"{((now.day - 1) // 7) + 1:02d}"
 
-    print(f"🔮 Running scheduled prediction update for {today} / {week_key}...")
+    print(
+        f"🔮 Running scheduled prediction update for {today} / {year}-{month}-{week}..."
+    )
 
     daily_root = db.reference("/daily_summary").get() or {}
     for user_id, devices in daily_root.items():
@@ -27,8 +31,6 @@ def scheduled_prediction_update():
                         {
                             "predicted_kWh": daily_pred,
                             "timestamp": now.isoformat(),
-                            "model": "Prophet",
-                            "horizon": "D0",
                         }
                     )
                     print(f"✅ Daily prediction stored for {appliance_name} ({today})")
@@ -40,18 +42,48 @@ def scheduled_prediction_update():
                     )
                     if weekly_pred:
                         db.reference(
-                            f"/predictions/{user_id}/{device_id}/{appliance_name}/weekly/{week_key}"
+                            f"/predictions/{user_id}/{device_id}/{appliance_name}/weekly/{year}/{month}/{week}"
                         ).set(
                             {
                                 "predicted_kWh": weekly_pred,
                                 "timestamp": now.isoformat(),
-                                "model": "Prophet",
-                                "horizon": "W0",
                             }
                         )
                         print(
-                            f"✅ Weekly prediction stored for {appliance_name} ({week_key})"
+                            f"✅ Weekly prediction stored for {appliance_name} ({year}-{month}-{week})"
                         )
+
+        # =============================
+        # 🔹 TOTAL CONSUMPTION PREDICTIONS
+        # =============================
+        print(f"📊 Generating total predictions for user: {user_id}")
+
+        # ---- Total Daily Prediction ----
+        total_daily_pred = total_daily_prediction(user_id)
+        if total_daily_pred:
+            db.reference(f"/predictions/{user_id}/total_consumption/daily/{today}").set(
+                {
+                    "predicted_kWh": total_daily_pred,
+                    "timestamp": now.isoformat(),
+                }
+            )
+            print(f"✅ Total daily prediction stored for {user_id} ({today})")
+
+        # ---- Total Weekly Prediction (only on Mondays) ----
+        if now.weekday() == 0:  # Monday
+            total_weekly_pred = total_weekly_prediction(user_id)
+            if total_weekly_pred:
+                db.reference(
+                    f"/predictions/{user_id}/total_consumption/weekly/{year}/{month}/{week}"
+                ).set(
+                    {
+                        "predicted_kWh": total_weekly_pred,
+                        "timestamp": now.isoformat(),
+                    }
+                )
+                print(
+                    f"✅ Total weekly prediction stored for {user_id} ({year}-{month}-{week})"
+                )
 
 
 def appliance_daily_prediction(user_id, device_id, appliance_name):
@@ -114,6 +146,79 @@ def appliance_weekly_prediction(user_id, device_id, appliance_name):
     df = df.sort_values("ds")
 
     model = Prophet(weekly_seasonality=True)
+    model.fit(df)
+
+    future = model.make_future_dataframe(periods=1, freq="W-MON")
+    forecast = model.predict(future)
+    prediction = forecast.iloc[-1]
+    return round(prediction["yhat"], 2)
+
+
+def total_daily_prediction(user_id):
+    """Generate total daily consumption prediction from /daily_total_consumption."""
+    MIN_DAYS = 7
+    daily_ref = db.reference(f"/daily_total_consumption/{user_id}")
+    daily_data = daily_ref.get()
+
+    if not daily_data or len(daily_data) < MIN_DAYS:
+        print(f"❌ Not enough daily total data for {user_id}.")
+        return None
+
+    sorted_dates = sorted(daily_data.keys())
+    rows = [
+        {"ds": d, "y": float(daily_data[d].get("total_energy_consumption", 0))}
+        for d in sorted_dates
+        if daily_data[d].get("total_energy_consumption", 0) > 0
+    ]
+    if len(rows) < MIN_DAYS:
+        print(f"❌ Not enough valid daily totals for {user_id}.")
+        return None
+
+    df = pd.DataFrame(rows)
+    df["ds"] = pd.to_datetime(df["ds"])
+    df = df.sort_values("ds")
+
+    model = Prophet(daily_seasonality=True, weekly_seasonality=True)
+    model.fit(df)
+
+    future = model.make_future_dataframe(periods=1)
+    forecast = model.predict(future)
+    prediction = forecast.iloc[-1]
+    return round(prediction["yhat"], 2)
+
+
+def total_weekly_prediction(user_id):
+    """Generate total weekly consumption prediction from /weekly_total_consumption."""
+    MIN_WEEKS = 4
+    weekly_ref = db.reference(f"/weekly_total_consumption/{user_id}")
+    weekly_data = weekly_ref.get()
+
+    if not weekly_data:
+        print(f"❌ No weekly total data for {user_id}.")
+        return None
+
+    rows = []
+    for year, months in weekly_data.items():
+        for month, weeks in months.items():
+            for week, summary in weeks.items():
+                try:
+                    start_date = summary.get("start_date")
+                    total_kwh = float(summary.get("total_energy_consumption", 0))
+                    if total_kwh > 0 and start_date:
+                        rows.append({"ds": start_date, "y": total_kwh})
+                except Exception as e:
+                    print("⚠️ Error parsing weekly total:", e)
+                    continue
+
+    if len(rows) < MIN_WEEKS:
+        print(f"❌ Not enough weekly totals for {user_id}.")
+        return None
+
+    df = pd.DataFrame(rows)
+    df["ds"] = pd.to_datetime(df["ds"])
+    df = df.sort_values("ds")
+
+    model = Prophet(weekly_seasonality=True, daily_seasonality=False)
     model.fit(df)
 
     future = model.make_future_dataframe(periods=1, freq="W-MON")

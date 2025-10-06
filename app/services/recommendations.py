@@ -57,7 +57,7 @@ def generate_recommendation(user_data: dict):
     """
     try:
         response = client_gemini.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         cleaned_response = re.sub(r"^```json\n|```$", "", response.text).strip()
