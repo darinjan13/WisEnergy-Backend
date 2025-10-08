@@ -2,7 +2,12 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
 from firebase_admin import auth
 from ..utils.firebase import fs
-from ..models.user_models import PasswordResetRequest, OTPRequest, OTPRequestWithCode
+from ..models.user_models import (
+    PasswordResetRequest,
+    OTPRequest,
+    OTPRequestWithCode,
+    EmailStr,
+)
 from ..services.otp import generate_otp_code, send_otp_email, save_otp
 
 router = APIRouter()
@@ -20,22 +25,23 @@ def reset_password(data: PasswordResetRequest):
 
 @router.post("/generate-otp")
 def generate_otp(req: OTPRequest):
-    try:
-        # If OTP is for FORGOT PASSWORD, user must exist
-        if not req.userVerification:
+    # For password reset (userVerification=False), check if user exists
+    if not req.userVerification:
+        try:
             auth.get_user_by_email(req.email)
+        except auth.UserNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"{req.email} is not yet registered."
+            )
+    # For registration (userVerification=True), skip user existence check
 
-        # If OTP is for REGISTRATION, skip user existence check
-    except auth.UserNotFoundError:
-        raise HTTPException(
-            status_code=404, detail=f"{req.email} is not yet registered."
-        )
-
-    otp = generate_otp_code()
-    save_otp(req.email, otp)
-    send_otp_email(req.email, otp, req.userVerification)
-
-    return {"success": True, "message": f"OTP sent to {req.email}"}
+    try:
+        otp = generate_otp_code()
+        save_otp(req.email, otp)
+        send_otp_email(req.email, otp, req.userVerification)
+        return {"success": True, "message": f"OTP sent to {req.email}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send OTP: {str(e)}")
 
 
 @router.post("/verify-otp")

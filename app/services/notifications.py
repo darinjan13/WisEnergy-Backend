@@ -61,3 +61,36 @@ def save_notification(user_id, title, message, ntype="system"):
         print(f"💾 Notification saved for {user_id}")
     except Exception as e:
         print(f"⚠️ Failed to save notification for {user_id}: {e}")
+
+
+def can_send_alert(user_id: str, appliance: str, now_ph: datetime, db):
+    """
+    Check if a high usage alert can be sent (cooldown of 4 hours per appliance).
+
+    Args:
+        user_id (str): User ID.
+        appliance (str): Appliance name.
+        now_ph (datetime): Current timestamp in PH timezone.
+        db: Database reference.
+
+    Returns:
+        bool: True if an alert can be sent, False if within cooldown.
+    """
+    last_alert = (
+        db.reference(f"/notifications/{user_id}")
+        .order_by_child("appliance")
+        .equal_to(appliance)
+        .order_by_child("created_at")
+        .limit_to_last(1)
+        .get()
+    )
+    if last_alert:
+        last_alert_time = list(last_alert.values())[0].get("created_at")
+        try:
+            last_alert_dt = datetime.strptime(last_alert_time, "%Y-%m-%d %H:%M:%S")
+            if (now_ph - last_alert_dt).total_seconds() < 4 * 3600:
+                print(f"⏳ Cooldown active for {appliance} alert for {user_id}")
+                return False
+        except Exception as e:
+            print(f"⚠️ Error checking cooldown for {appliance}: {e}")
+    return True

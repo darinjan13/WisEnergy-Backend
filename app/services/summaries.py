@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta
 from ..utils.firebase import db
 from ..utils.timezone import PH_TZ
-from .notifications import notify_user, save_notification
-from .recommendations import generate_4hour_recommendation
+from .notifications import notify_user, save_notification, can_send_alert
+from .recommendations import generate_4hour_recommendation, detect_high_usage_peaks
+from statistics import mean
 
 
 def hourly_summary_update():
@@ -11,18 +12,14 @@ def hourly_summary_update():
     today = prev_hour.strftime("%Y-%m-%d")
     hour_key = prev_hour.strftime("%H:00")
 
-    # Week bucket
+    # Week & Month buckets
     current_day = prev_hour.weekday()
     week_start = prev_hour - timedelta(days=current_day)
     week_end = week_start + timedelta(days=6)
-    y = str(week_start.year)
-    m = f"{week_start.month:02d}"
+    y, m = str(week_start.year), f"{week_start.month:02d}"
     w = f"{((week_start.day - 1) // 7) + 1:02d}"
-
-    # Month bucket
     month_start = prev_hour.replace(day=1)
-    y_month = str(month_start.year)
-    m_month = f"{month_start.month:02d}"
+    y_month, m_month = str(month_start.year), f"{month_start.month:02d}"
 
     print(f"📊 Running hourly summary update for {today} {hour_key}...")
 
@@ -31,6 +28,7 @@ def hourly_summary_update():
         print("⚠️ No usage data.")
         return
 
+    # ------------------------ MAIN LOOP ------------------------
     for user_id in users:
         devices = db.reference(f"/usage/{user_id}").get(shallow=True) or {}
         for device_id in devices:
@@ -45,7 +43,7 @@ def hourly_summary_update():
                     or {}
                 )
 
-                # Collect powers + timestamps for prev hour
+                # Collect hourly power data
                 records = []
                 for ts, rec in day_data.items():
                     try:
@@ -60,8 +58,7 @@ def hourly_summary_update():
                     continue
 
                 records.sort(key=lambda x: x[0])
-                total_kwh_hour = 0.0
-                powers = []
+                total_kwh_hour, powers = 0.0, []
 
                 for i in range(len(records) - 1):
                     t1, p1 = records[i]
@@ -72,13 +69,14 @@ def hourly_summary_update():
 
                 max_power_hour = max(powers)
 
+                # --- DAILY SUMMARY ---
                 daily_ref = db.reference(
                     f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{today}"
                 )
                 existing = daily_ref.get() or {}
-
                 hourly_ref = daily_ref.child("hourly")
                 all_hourly = hourly_ref.get() or {}
+
                 if hour_key in all_hourly and all_hourly[hour_key] == round(
                     total_kwh_hour, 6
                 ):
@@ -122,10 +120,10 @@ def hourly_summary_update():
                 )
                 try:
                     existing_weekly = weekly_ref.get() or {}
-                    existing_kwh = float(existing_weekly.get("total_kWh", 0.0))
-                    new_kwh = existing_kwh + total_kwh_hour
+                    new_kwh = (
+                        float(existing_weekly.get("total_kWh", 0.0)) + total_kwh_hour
+                    )
                     end_date = min(today, week_end.strftime("%Y-%m-%d"))
-
                     weekly_ref.set(
                         {
                             "total_kWh": round(new_kwh, 6),
@@ -143,10 +141,10 @@ def hourly_summary_update():
                 )
                 try:
                     existing_monthly = monthly_ref.get() or {}
-                    existing_kwh = float(existing_monthly.get("total_kWh", 0.0))
-                    new_monthly_kwh = round(existing_kwh + total_kwh_hour, 6)
-
-                    # Approximate end of month
+                    new_monthly_kwh = round(
+                        float(existing_monthly.get("total_kWh", 0.0)) + total_kwh_hour,
+                        6,
+                    )
                     next_month = month_start.replace(day=28) + timedelta(days=4)
                     month_end = (next_month - timedelta(days=next_month.day)).strftime(
                         "%Y-%m-%d"
@@ -163,123 +161,127 @@ def hourly_summary_update():
                 except Exception as e:
                     print(f"⚠️ Failed monthly_summary {appliance_name}: {e}")
 
-                # --- APPLIANCE latest_kwh ---
-                appliance_ref = db.reference(
-                    f"/appliances/{user_id}/{device_id}/{appliance_name}"
-                )
+                # --- APPLIANCE LATEST KWH ---
                 try:
-                    appliance_data = appliance_ref.get() or {}
-                    prev_total = float(appliance_data.get("latest_kwh", 0.0))
-                    appliance_ref.update(
+                    app_ref = db.reference(
+                        f"/appliances/{user_id}/{device_id}/{appliance_name}"
+                    )
+                    app_data = app_ref.get() or {}
+                    prev_total = float(app_data.get("latest_kwh", 0.0))
+                    app_ref.update(
                         {"latest_kwh": round(prev_total + total_kwh_hour, 6)}
                     )
                 except Exception as e:
                     print(f"⚠️ Failed latest_kwh update {appliance_name}: {e}")
 
+    # ---------------------- AI + NOTIFICATIONS ----------------------
     should_notify = (now_ph.hour % 4) == 0
-    if should_notify:
-        label_hour = now_ph.strftime("%H:00")
+    if not should_notify:
+        print("⏩ Skipping AI insights this hour.")
+        return
 
-        for user_id in users:
-            notif_ref = db.reference(f"/notifications/{user_id}")
-            user_notifs = (
-                notif_ref.order_by_child("created_at").limit_to_last(1).get() or {}
-            )
+    for user_id in users:
+        # Gather last 4-hour window
+        prev_hrs = [(prev_hour - timedelta(hours=i)) for i in range(4)]
+        user_data = {}
 
-            # check if already notified for this 4-hour slot
-            already_notified = False
-            for _, last_notif in user_notifs.items():
-                if (
-                    "created_at" in last_notif
-                    and last_notif["created_at"][:13]
-                    == now_ph.strftime("%Y-%m-%d %H")[:13]
-                    and last_notif.get("type") == "ai_insight"
-                ):
-                    already_notified = True
-                    break
+        for device_id in db.reference(f"/usage/{user_id}").get(shallow=True) or {}:
+            for app in (
+                db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True) or {}
+            ):
+                if app not in user_data:
+                    user_data[app] = {"hourly": {}}
+                for h_dt in prev_hrs:
+                    day_str, h_key = h_dt.strftime("%Y-%m-%d"), h_dt.strftime("%H:00")
+                    kwh = db.reference(
+                        f"/daily_summary/{user_id}/{device_id}/{app}/{day_str}/hourly/{h_key}"
+                    ).get()
+                    if kwh is not None:
+                        user_data[app]["hourly"][h_key] = float(kwh)
 
-            if already_notified:
-                print(
-                    f"ℹ️ Skipping user {user_id} — already notified for this 4-hour slot."
-                )
-                continue
+        print(f"User data for {user_id}: {user_data}")
 
-            # Collect last 4 hours data
-            last_4_hours = []
-            for j in range(4):
-                h_dt = prev_hour - timedelta(hours=j)
-                day_str = h_dt.strftime("%Y-%m-%d")
-                h_key = h_dt.strftime("%H:00")
-                last_4_hours.append((day_str, h_key))
+        # --- Detect high usage peaks ---
+        peaks = detect_high_usage_peaks(user_data)
 
-            user_data = {}
-            devices = db.reference(f"/usage/{user_id}").get(shallow=True) or {}
-            for device_id in devices:
-                appliances = (
-                    db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True)
-                    or {}
-                )
-                for appliance_name in appliances:
-                    if appliance_name not in user_data:
-                        user_data[appliance_name] = {"hourly": {}}
-                    for day_str, h_key in last_4_hours:
-                        daily_ref = db.reference(
-                            f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{day_str}"
-                        )
-                        kwh = daily_ref.child("hourly").child(h_key).get()
-                        if kwh is not None:
-                            user_data[appliance_name]["hourly"][h_key] = float(kwh)
+        # --- Get recommendations and insights ---
+        ai_data = generate_4hour_recommendation(user_data)
 
-            # Generate AI recommendations
-            ai_data = generate_4hour_recommendation(user_data)
-            peaks_str = (
-                " ".join(
-                    [
-                        f"- {p['appliance']}: {p['kWh']} kWh at {p['hour']}"
-                        for p in ai_data.get("peaks", [])
-                    ]
-                )
-                or "No peaks identified."
-            )
+        # --- User notification preferences ---
+        user_settings = db.reference(f"/users/{user_id}").get() or {}
+        notify_reco = user_settings.get("notify_smart_recommendation", True)
+        notify_peak = user_settings.get("notify_high_usage_alerts", True)
 
-            insights_str = ai_data.get("insights") or "No insights available."
-            recs_str = ai_data.get("recommendations") or "No recommendations available."
-
-            title = "WisEnergy Update ⚡"
-            push_body = "Your 4-hour summary is ready. Peaks, insights, and recommendations updated."
-            window_start = (now_ph - timedelta(hours=4)).strftime(
-                "%I:%M %p"
-            )  # e.g. 12:00 AM
-            window_end = now_ph.strftime("%I:%M %p")  # e.g. 04:00 AM
-            label_range = f"{window_start} - {window_end}"
-            message = (
-                f"Your energy summary for the last 4 hours ({label_range}) is updated.\n\n"
-                f"Peak Usages: {peaks_str}\n"
-                f"Insights: {insights_str}\n"
-                f"Recommendations: {recs_str}"
-            )
-
-            # Send push
+        # --- SMART RECOMMENDATIONS ---
+        if notify_reco and ai_data.get("recommendations"):
+            reco_text = "\n• ".join(ai_data["recommendations"][:2])
             notify_user(
                 uid=user_id,
-                title=title,
-                body=push_body,
-                data={"screen": "notifications", "date": today, "hour": label_hour},
+                title="💡 Smart Recommendations",
+                body=reco_text,
+                data={"screen": "notifications", "type": "smart_recommendation"},
             )
-
-            # Save to notifications node
-            notif_ref.push(
+            db.reference(f"/notifications/{user_id}").push(
                 {
-                    "title": title,
-                    "message": message,
-                    "type": "ai_insight",
+                    "title": "💡 Smart Recommendations",
+                    "message": reco_text,
+                    "type": "smart_recommendation",
                     "created_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
                     "read_at": None,
                 }
             )
-            print(f"💾 Notification saved for {user_id}")
+            save_notification(
+                user_id=user_id,
+                title=f"⚠️ High Usage Alert: {app}",
+                message=msg,
+                ntype="high_usage_alert",
+            )
+            print(f"📬 Sent smart recommendations to {user_id}")
 
-    print("🎉 Hourly, weekly, monthly, and latest_kwh update completed.")
+        # --- HIGH USAGE ALERTS ---
+        if notify_peak and peaks:
+            for peak in peaks:
+                app = peak.get("appliance")
+                kwh = float(peak.get("kWh", 0))
+                hour = peak.get("hour")
+
+                # Recompute non-max mean for consistency
+                hourly_items = user_data.get(app, {}).get("hourly", {})
+                hourly_kwh = list(hourly_items.values())
+                non_max_kwh = [val for val in hourly_kwh if val != kwh]
+                base = mean(non_max_kwh) if non_max_kwh else 0
+
+                if (
+                    base > 0
+                    and kwh >= base * 2.0
+                    and can_send_alert(user_id, app, now_ph, db)
+                ):
+                    msg = f"{app} peaked at {kwh:.2f} kWh at {hour} (avg excluding peak ≈ {base:.2f})."
+                    notify_user(
+                        uid=user_id,
+                        title=f"⚠️ High Usage Alert: {app}",
+                        body=msg,
+                        data={"screen": "notifications", "type": "high_usage_alert"},
+                    )
+                    db.reference(f"/notifications/{user_id}").push(
+                        {
+                            "title": f"⚠️ High Usage Alert: {app}",
+                            "message": msg,
+                            "type": "high_usage_alert",
+                            "appliance": app,
+                            "created_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                            "read_at": None,
+                        }
+                    )
+                    save_notification(
+                        user_id=user_id,
+                        title=f"⚠️ High Usage Alert: {app}",
+                        message=msg,
+                        ntype="high_usage_alert",
+                    )
+                    print(f"⚡ Sent high usage alert for {app} to {user_id}")
+
+    print("🎉 Hourly summaries and AI-driven notifications complete.")
 
 
 def weekly_summary_aggregation():
