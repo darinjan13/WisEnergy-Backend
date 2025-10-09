@@ -235,19 +235,10 @@ def hourly_summary_update():
                 body=random_message,
                 data={"screen": "notifications", "type": "smart_recommendation"},
             )
-            db.reference(f"/notifications/{user_id}").push(
-                {
-                    "title": "💡 Smart Recommendations",
-                    "message": random_message,
-                    "type": "smart_recommendation",
-                    "created_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
-                    "read_at": None,
-                }
-            )
             save_notification(
                 user_id=user_id,
                 title=f"⚠️ High Usage Alert: {app}",
-                message=msg,
+                message=random_message,
                 ntype="high_usage_alert",
             )
             print(f"📬 Sent smart recommendations to {user_id}")
@@ -276,16 +267,6 @@ def hourly_summary_update():
                         title=f"⚠️ High Usage Alert: {app}",
                         body=msg,
                         data={"screen": "notifications", "type": "high_usage_alert"},
-                    )
-                    db.reference(f"/notifications/{user_id}").push(
-                        {
-                            "title": f"⚠️ High Usage Alert: {app}",
-                            "message": msg,
-                            "type": "high_usage_alert",
-                            "appliance": app,
-                            "created_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
-                            "read_at": None,
-                        }
                     )
                     save_notification(
                         user_id=user_id,

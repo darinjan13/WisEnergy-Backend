@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from typing import List
 from firebase_admin import auth
-from datetime import datetime
+from datetime import datetime, timedelta
 from ..utils.firebase import db
-from ..models.user_models import User, AdminLoginRequest
+from ..models.user_models import User, AdminLoginRequest, UserUpdate
 from ..config import FIREBASE_API_KEY
 import requests
 
@@ -77,7 +77,7 @@ def get_all_users():
             "last_name": data.get("last_name"),
             "location": data.get("location"),
             "created_at": data.get("created_at"),
-            "date_modifed": data.get("date_modified"),
+            "updated_at": data.get("updated_at"),
             "role": data.get("role"),
             "password": auth_users.get(uid, {}).get("password"),
         }
@@ -104,8 +104,7 @@ def add_user(user: User):
             "email": user.email,
             "location": user.location,
             "role": user.role,
-            "date_created": now,
-            "date_modified": now,
+            "created_at": now,
         }
         ref.child(user_id).set(payload)
         return {"status": "success", "data": payload}
@@ -114,7 +113,7 @@ def add_user(user: User):
 
 
 @router.put("/users/{user_id}")
-def edit_user(user_id: str, user: User):
+def edit_user(user_id: str, user: UserUpdate):
     try:
         ref = db.reference(f"/users/{user_id}")
         existing = ref.get()
@@ -135,9 +134,28 @@ def edit_user(user_id: str, user: User):
             "email": user.email,
             "location": user.location,
             "role": user.role,
-            "date_modified": now,
+            "updated_at": now,
         }
         ref.update(updated_data)
         return {"status": "success", "data": {**existing, **updated_data}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/users/{user_id}/schedule-delete")
+def schedule_user_deletion(user_id: str):
+    """Marks the account for deletion and stores deletion_date only."""
+    try:
+        delete_time = datetime.now() + timedelta(days=30)
+        db.reference(f"users/{user_id}").update(
+            {"deletion_date": delete_time.strftime("%Y-%m-%d %H:%M:%S")}
+        )
+
+        return {
+            "status": "scheduled",
+            "message": "Account deletion scheduled in 30 days.",
+            "deletion_date": delete_time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

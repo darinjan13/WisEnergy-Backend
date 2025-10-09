@@ -25,6 +25,14 @@ class User(BaseModel):
     role: str
 
 
+class UserUpdate(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    location: str
+    role: str
+
+
 class AdminLoginRequest(BaseModel):
     email: str
     password: str
