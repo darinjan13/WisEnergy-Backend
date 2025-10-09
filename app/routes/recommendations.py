@@ -1,11 +1,9 @@
-from fastapi import APIRouter, HTTPException
-from datetime import datetime, timedelta
+from fastapi import APIRouter
+from datetime import datetime
 from ..services.recommendations import (
     generate_recommendation,
     fetch_user_data,
-    generate_4hour_recommendation,
 )
-from ..services.notifications import notify_user, save_notification
 from ..utils.firebase import db
 from ..utils.timezone import PH_TZ
 

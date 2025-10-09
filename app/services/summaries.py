@@ -4,6 +4,7 @@ from ..utils.timezone import PH_TZ
 from .notifications import notify_user, save_notification, can_send_alert
 from .recommendations import generate_4hour_recommendation, detect_high_usage_peaks
 from statistics import mean
+import random
 
 
 def hourly_summary_update():
@@ -201,30 +202,43 @@ def hourly_summary_update():
 
         print(f"User data for {user_id}: {user_data}")
 
-        # --- Detect high usage peaks ---
         peaks = detect_high_usage_peaks(user_data)
 
-        # --- Get recommendations and insights ---
         ai_data = generate_4hour_recommendation(user_data)
 
-        # --- User notification preferences ---
         user_settings = db.reference(f"/users/{user_id}").get() or {}
         notify_reco = user_settings.get("notify_smart_recommendation", True)
         notify_peak = user_settings.get("notify_high_usage_alerts", True)
 
-        # --- SMART RECOMMENDATIONS ---
-        if notify_reco and ai_data.get("recommendations"):
-            reco_text = "\n• ".join(ai_data["recommendations"][:2])
+        if notify_reco:
+            random_messages = [
+                "New AI Insight available.",
+                "AI has a new tip for you.",
+                "Fresh energy-saving insight ready.",
+                "Check your latest AI Insight.",
+                "AI generated a new recommendation.",
+                "Your next AI Insight is here.",
+                "See today’s energy tip from AI.",
+                "AI has analyzed your usage.",
+                "A new saving idea is ready.",
+                "Your energy insight just arrived.",
+                "Smart tip unlocked by AI.",
+                "AI found a way to save more.",
+                "You’ve got a new AI Insight.",
+                "Energy tip updated — check it out.",
+            ]
+            random_message = random.choice(random_messages)
+
             notify_user(
                 uid=user_id,
                 title="💡 Smart Recommendations",
-                body=reco_text,
+                body=random_message,
                 data={"screen": "notifications", "type": "smart_recommendation"},
             )
             db.reference(f"/notifications/{user_id}").push(
                 {
                     "title": "💡 Smart Recommendations",
-                    "message": reco_text,
+                    "message": random_message,
                     "type": "smart_recommendation",
                     "created_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
                     "read_at": None,
