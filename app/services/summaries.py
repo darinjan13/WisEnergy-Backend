@@ -85,10 +85,33 @@ def hourly_summary_update():
                     continue
 
                 try:
-                    hourly_ref.update({hour_key: round(total_kwh_hour, 6)})
+                    prev_val = float(all_hourly.get(hour_key, 0.0))
+                    increment = round(total_kwh_hour - prev_val, 6)
+
+                    if abs(increment) > 0:
+                        daily_total_ref = db.reference(
+                            f"/daily_total_consumption/{user_id}/{today}/total_energy_consumption"
+                        )
+                        current_total = float(daily_total_ref.get() or 0.0)
+                        new_total = current_total + increment
+
+                        db.reference(
+                            f"/daily_total_consumption/{user_id}/{today}"
+                        ).update(
+                            {
+                                "total_energy_consumption": round(new_total, 6),
+                                "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
+                        print(
+                            f"🧮 Updated daily_total for {user_id}: +{increment:.6f} kWh (now {new_total:.6f})"
+                        )
+                    else:
+                        print(
+                            f"ℹ️ No change for {appliance_name} {hour_key}, skipping total increment."
+                        )
                 except Exception as e:
-                    print(f"⚠️ Failed hourly update {appliance_name}: {e}")
-                    continue
+                    print(f"⚠️ Failed safe daily total update for {user_id}: {e}")
 
                 all_hourly = hourly_ref.get() or {}
                 new_total = sum(all_hourly.values())
@@ -114,6 +137,21 @@ def hourly_summary_update():
                 print(
                     f"✅ {appliance_name} {today} {hour_key}: kWh={round(total_kwh_hour,4)}"
                 )
+                try:
+                    daily_total_ref = db.reference(
+                        f"/daily_total_consumption/{user_id}/{today}/total_energy_consumption"
+                    )
+                    current_total = daily_total_ref.get() or 0.0
+                    new_total = float(current_total) + total_kwh_hour
+
+                    db.reference(f"/daily_total_consumption/{user_id}/{today}").update(
+                        {
+                            "total_energy_consumption": round(new_total, 6),
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed daily total update for {user_id}: {e}")
 
                 # --- WEEKLY SUMMARY ---
                 weekly_ref = db.reference(
