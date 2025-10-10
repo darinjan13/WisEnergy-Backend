@@ -237,7 +237,7 @@ def hourly_summary_update():
             )
             save_notification(
                 user_id=user_id,
-                title=f"⚠️ High Usage Alert: {app}",
+                title="💡 Smart Recommendations",
                 message=random_message,
                 ntype="high_usage_alert",
             )
