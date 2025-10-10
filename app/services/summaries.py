@@ -239,7 +239,7 @@ def hourly_summary_update():
                 user_id=user_id,
                 title="💡 Smart Recommendations",
                 message=random_message,
-                ntype="high_usage_alert",
+                ntype="smart_recommendation",
             )
             print(f"📬 Sent smart recommendations to {user_id}")
 
