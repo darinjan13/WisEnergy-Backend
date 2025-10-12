@@ -8,7 +8,8 @@ from .services.summaries import (
     total_energy_consumption,
 )
 from .services.predictions import scheduled_prediction_update
-from .services.users import check_scheduled_deletions
+
+# from .services.users import check_scheduled_deletions
 from .routes import (
     users,
     devices,
@@ -65,5 +66,5 @@ scheduler.add_job(
     scheduled_prediction_update, "cron", hour=0, minute=20, timezone=PH_TZ
 )
 scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
-scheduler.add_job(check_scheduled_deletions, "cron", hour=0, minute=30, timezone=PH_TZ)
+# scheduler.add_job(check_scheduled_deletions, "cron", hour=0, minute=30, timezone=PH_TZ)
 scheduler.start()

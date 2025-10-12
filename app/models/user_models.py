@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 
 
 class OTPRequest(BaseModel):
@@ -21,7 +22,7 @@ class User(BaseModel):
     last_name: str
     email: EmailStr
     password: str
-    location: str
+    ocation: Optional[str] = None
     role: str
 
 
@@ -29,8 +30,7 @@ class UserUpdate(BaseModel):
     first_name: str
     last_name: str
     email: EmailStr
-    location: str
-    role: str
+    location: Optional[str] = None
 
 
 class AdminLoginRequest(BaseModel):

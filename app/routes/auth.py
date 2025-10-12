@@ -25,22 +25,37 @@ def reset_password(data: PasswordResetRequest):
 
 @router.post("/generate-otp")
 def generate_otp(req: OTPRequest):
+    print(
+        f"Request received: email={req.email}, userVerification={req.userVerification}"
+    )
+
     # For password reset (userVerification=False), check if user exists
     if not req.userVerification:
         try:
-            auth.get_user_by_email(req.email)
+            user = auth.get_user_by_email(req.email)
+            print(f"User found: {user}")
         except auth.UserNotFoundError:
+            print(f"User not found: {req.email}")
             raise HTTPException(
-                status_code=404, detail=f"{req.email} is not yet registered."
+                status_code=404, detail=f"{req.email} is not registered."
             )
-    # For registration (userVerification=True), skip user existence check
+    else:
+        print(f"Skipping user check for email verification: {req.email}")
 
+    # Generate and send OTP
     try:
         otp = generate_otp_code()
         save_otp(req.email, otp)
         send_otp_email(req.email, otp, req.userVerification)
-        return {"success": True, "message": f"OTP sent to {req.email}"}
+        message = (
+            "An OTP has been sent to your email for verification."
+            if req.userVerification
+            else "An OTP has been sent to reset your password."
+        )
+        print(f"OTP sent to {req.email}")
+        return {"success": True, "message": f"{message}"}
     except Exception as e:
+        print(f"Error sending OTP: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to send OTP: {str(e)}")
 
 

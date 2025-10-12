@@ -87,6 +87,7 @@ def get_all_users():
 
 @router.post("/users")
 def add_user(user: User):
+    print(user)
     try:
         now = datetime.now().strftime("%Y-%m-%d")
         firebase_user = auth.create_user(
@@ -127,13 +128,13 @@ def edit_user(user_id: str, user: UserUpdate):
             email=user.email,
             display_name=f"{user.first_name} {user.last_name}",
         )
+        print(now)
 
         updated_data = {
             "first_name": user.first_name,
             "last_name": user.last_name,
             "email": user.email,
             "location": user.location,
-            "role": user.role,
             "updated_at": now,
         }
         ref.update(updated_data)

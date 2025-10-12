@@ -84,6 +84,31 @@ def hourly_summary_update():
                     print(f"ℹ️ Skipping {appliance_name} {hour_key}, already processed.")
                     continue
 
+                all_hourly = hourly_ref.get() or {}
+                new_total = sum(all_hourly.values())
+
+                all_powers = [float(r.get("power", 0)) for r in day_data.values()]
+                avg_power_day = sum(all_powers) / len(all_powers) if all_powers else 0
+
+                try:
+                    daily_ref.update(
+                        {
+                            "total_kWh": round(new_total, 6),
+                            "avg_power": round(avg_power_day, 2),
+                            "max_power": max(
+                                float(existing.get("max_power", 0)), max_power_hour
+                            ),
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed daily_summary {appliance_name}: {e}")
+                    continue
+
+                print(
+                    f"✅ {appliance_name} {today} {hour_key}: kWh={round(total_kwh_hour,4)}"
+                )
+
                 try:
                     prev_val = float(all_hourly.get(hour_key, 0.0))
                     increment = round(total_kwh_hour - prev_val, 6)
@@ -112,31 +137,6 @@ def hourly_summary_update():
                         )
                 except Exception as e:
                     print(f"⚠️ Failed safe daily total update for {user_id}: {e}")
-
-                all_hourly = hourly_ref.get() or {}
-                new_total = sum(all_hourly.values())
-
-                all_powers = [float(r.get("power", 0)) for r in day_data.values()]
-                avg_power_day = sum(all_powers) / len(all_powers) if all_powers else 0
-
-                try:
-                    daily_ref.update(
-                        {
-                            "total_kWh": round(new_total, 6),
-                            "avg_power": round(avg_power_day, 2),
-                            "max_power": max(
-                                float(existing.get("max_power", 0)), max_power_hour
-                            ),
-                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-                    )
-                except Exception as e:
-                    print(f"⚠️ Failed daily_summary {appliance_name}: {e}")
-                    continue
-
-                print(
-                    f"✅ {appliance_name} {today} {hour_key}: kWh={round(total_kwh_hour,4)}"
-                )
                 try:
                     daily_total_ref = db.reference(
                         f"/daily_total_consumption/{user_id}/{today}/total_energy_consumption"
