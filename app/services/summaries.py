@@ -17,8 +17,8 @@ def hourly_summary_update():
     current_day = prev_hour.weekday()
     week_start = prev_hour - timedelta(days=current_day)
     week_end = week_start + timedelta(days=6)
-    y, m = str(week_start.year), f"{week_start.month:02d}"
-    w = f"{((week_start.day - 1) // 7) + 1:02d}"
+    year_iso, week_iso = prev_hour.isocalendar()[0], f"{prev_hour.isocalendar()[1]:02d}"
+    month_year, month_num = str(week_start.year), f"{week_start.month:02d}"
     month_start = prev_hour.replace(day=1)
     y_month, m_month = str(month_start.year), f"{month_start.month:02d}"
 
@@ -32,6 +32,9 @@ def hourly_summary_update():
     # ------------------------ MAIN LOOP ------------------------
     for user_id in users:
         devices = db.reference(f"/usage/{user_id}").get(shallow=True) or {}
+        if not devices:
+            print(f"ℹ️ No devices for user {user_id}")
+            continue
         for device_id in devices:
             appliances = (
                 db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True) or {}
@@ -85,12 +88,13 @@ def hourly_summary_update():
                     continue
 
                 all_hourly = hourly_ref.get() or {}
-                new_total = sum(all_hourly.values())
+                new_total = sum(all_hourly.values()) + round(total_kwh_hour, 6)
 
                 all_powers = [float(r.get("power", 0)) for r in day_data.values()]
                 avg_power_day = sum(all_powers) / len(all_powers) if all_powers else 0
 
                 try:
+                    hourly_ref.child(hour_key).set(round(total_kwh_hour, 6))
                     daily_ref.update(
                         {
                             "total_kWh": round(new_total, 6),
@@ -108,35 +112,6 @@ def hourly_summary_update():
                 print(
                     f"✅ {appliance_name} {today} {hour_key}: kWh={round(total_kwh_hour,4)}"
                 )
-
-                try:
-                    prev_val = float(all_hourly.get(hour_key, 0.0))
-                    increment = round(total_kwh_hour - prev_val, 6)
-
-                    if abs(increment) > 0:
-                        daily_total_ref = db.reference(
-                            f"/daily_total_consumption/{user_id}/{today}/total_energy_consumption"
-                        )
-                        current_total = float(daily_total_ref.get() or 0.0)
-                        new_total = current_total + increment
-
-                        db.reference(
-                            f"/daily_total_consumption/{user_id}/{today}"
-                        ).update(
-                            {
-                                "total_energy_consumption": round(new_total, 6),
-                                "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
-                            }
-                        )
-                        print(
-                            f"🧮 Updated daily_total for {user_id}: +{increment:.6f} kWh (now {new_total:.6f})"
-                        )
-                    else:
-                        print(
-                            f"ℹ️ No change for {appliance_name} {hour_key}, skipping total increment."
-                        )
-                except Exception as e:
-                    print(f"⚠️ Failed safe daily total update for {user_id}: {e}")
                 try:
                     daily_total_ref = db.reference(
                         f"/daily_total_consumption/{user_id}/{today}/total_energy_consumption"
@@ -155,7 +130,7 @@ def hourly_summary_update():
 
                 # --- WEEKLY SUMMARY ---
                 weekly_ref = db.reference(
-                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
+                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{year_iso}/{month_num}/{week_iso}"
                 )
                 try:
                     existing_weekly = weekly_ref.get() or {}
@@ -163,7 +138,7 @@ def hourly_summary_update():
                         float(existing_weekly.get("total_kWh", 0.0)) + total_kwh_hour
                     )
                     end_date = min(today, week_end.strftime("%Y-%m-%d"))
-                    weekly_ref.set(
+                    weekly_ref.update(
                         {
                             "total_kWh": round(new_kwh, 6),
                             "start_date": week_start.strftime("%Y-%m-%d"),
@@ -241,8 +216,6 @@ def hourly_summary_update():
         print(f"User data for {user_id}: {user_data}")
 
         peaks = detect_high_usage_peaks(user_data)
-
-        ai_data = generate_4hour_recommendation(user_data)
 
         user_settings = db.reference(f"/users/{user_id}").get() or {}
         notify_reco = user_settings.get("notify_smart_recommendation", True)
