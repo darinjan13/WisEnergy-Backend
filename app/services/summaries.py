@@ -461,6 +461,8 @@ def total_energy_consumption():
 
             db.reference(f"/weekly_total_consumption/{user_id}/{yw}/{mw}/{ww}").set(
                 {
+                    "start_date": prev_week_start.strftime("%Y-%m-%d"),
+                    "end_date": prev_week_end.strftime("%Y-%m-%d"),
                     "total_energy_consumption": round(user_total, 2),
                     "updated_at": now_str,
                 }
