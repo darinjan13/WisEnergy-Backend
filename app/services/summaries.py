@@ -13,12 +13,11 @@ def hourly_summary_update():
     today = prev_hour.strftime("%Y-%m-%d")
     hour_key = prev_hour.strftime("%H:00")
 
-    # Week & Month buckets
     current_day = prev_hour.weekday()
     week_start = prev_hour - timedelta(days=current_day)
     week_end = week_start + timedelta(days=6)
-    year_iso, week_iso = prev_hour.isocalendar()[0], f"{prev_hour.isocalendar()[1]:02d}"
-    month_year, month_num = str(week_start.year), f"{week_start.month:02d}"
+    y, m = str(week_start.year), f"{week_start.month:02d}"
+    w = f"{((week_start.day - 1) // 7) + 1:02d}"
     month_start = prev_hour.replace(day=1)
     y_month, m_month = str(month_start.year), f"{month_start.month:02d}"
 
@@ -130,7 +129,7 @@ def hourly_summary_update():
 
                 # --- WEEKLY SUMMARY ---
                 weekly_ref = db.reference(
-                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{year_iso}/{month_num}/{week_iso}"
+                    f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
                 )
                 try:
                     existing_weekly = weekly_ref.get() or {}

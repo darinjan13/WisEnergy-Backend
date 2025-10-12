@@ -30,7 +30,7 @@ def scheduled_prediction_update():
                     ).set(
                         {
                             "predicted_kWh": daily_pred,
-                            "timestamp": f"{now.isoformat()} 00:20:00",
+                            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
                         }
                     )
                     print(f"✅ Daily prediction stored for {appliance_name} ({today})")
@@ -46,7 +46,7 @@ def scheduled_prediction_update():
                         ).set(
                             {
                                 "predicted_kWh": weekly_pred,
-                                "timestamp": f"{now.isoformat()} 00:20:00",
+                                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
                             }
                         )
                         print(
@@ -64,7 +64,7 @@ def scheduled_prediction_update():
             db.reference(f"/predictions/{user_id}/total_consumption/daily/{today}").set(
                 {
                     "predicted_kWh": total_daily_pred,
-                    "timestamp": f"{now.isoformat()} 00:20:00",
+                    "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
             print(f"✅ Total daily prediction stored for {user_id} ({today})")
@@ -78,7 +78,7 @@ def scheduled_prediction_update():
                 ).set(
                     {
                         "predicted_kWh": total_weekly_pred,
-                        "timestamp": f"{now.isoformat()} 00:20:00",
+                        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
                     }
                 )
                 print(
