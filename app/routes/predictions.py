@@ -27,20 +27,45 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
         )
         all_weekly = weekly_ref.get() or {}
 
-        # flatten existing
+        if not all_weekly:
+            return {"daily": last5_daily, "weekly": []}
+
         flat_weeks = []
-        for yy, months in (all_weekly or {}).items():
+        for yy, months in all_weekly.items():
             for mm, weeks in (months or {}).items():
                 for ww, payload in (weeks or {}).items():
                     flat_weeks.append((int(yy), int(mm), int(ww), payload))
         flat_weeks.sort(key=lambda x: (x[0], x[1], x[2]))
 
-        last7_weekly = [
-            {"year": yy, "month": f"{mm:02d}", "week": f"{ww:02d}", "data": payload}
-            for yy, mm, ww, payload in flat_weeks[-7:]
+        if not flat_weeks:
+            return {"daily": last5_daily, "weekly": []}
+
+        # 🔹 Determine current & previous month
+        now = datetime.now()
+        current_year, current_month = now.year, now.month
+        prev_month = current_month - 1 or 12
+        prev_year = current_year if current_month > 1 else current_year - 1
+
+        # 🔹 Separate current vs previous month data
+        this_month = [
+            w for w in flat_weeks if w[0] == current_year and w[1] == current_month
+        ]
+        prev_month_data = [
+            w for w in flat_weeks if w[0] == prev_year and w[1] == prev_month
         ]
 
-        return {"daily": last5_daily, "weekly": last7_weekly}
+        # 🔹 Choose which to include
+        if len(this_month) >= 2:
+            selected = this_month
+        else:
+            selected = (prev_month_data[-1:] if prev_month_data else []) + this_month
+
+        last_weeks = [
+            {"year": yy, "month": f"{mm:02d}", "week": f"{ww:02d}", "data": payload}
+            for yy, mm, ww, payload in selected
+        ]
+
+        return {"daily": last5_daily, "weekly": last_weeks}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -58,18 +83,42 @@ def predict_total_and_return_history(user_id: str):
         # ---------- WEEKLY TOTAL ----------
         weekly_ref = db.reference(f"/predictions/{user_id}/total_consumption/weekly")
         all_weekly = weekly_ref.get() or {}
+
         flat_weeks = []
-        for yy, months in (all_weekly or {}).items():
+        for yy, months in all_weekly.items():
             for mm, weeks in (months or {}).items():
                 for ww, payload in (weeks or {}).items():
                     flat_weeks.append((int(yy), int(mm), int(ww), payload))
         flat_weeks.sort(key=lambda x: (x[0], x[1], x[2]))
-        last6_weekly = [
-            {"year": yy, "month": f"{mm:02d}", "week": f"{ww:02d}", "data": payload}
-            for yy, mm, ww, payload in flat_weeks[-6:]
+
+        if not flat_weeks:
+            return {"daily": last7_daily, "weekly": []}
+
+        # 🔹 Current and previous month check
+        now = datetime.now()
+        current_year, current_month = now.year, now.month
+        prev_month = current_month - 1 or 12
+        prev_year = current_year if current_month > 1 else current_year - 1
+
+        this_month = [
+            w for w in flat_weeks if w[0] == current_year and w[1] == current_month
+        ]
+        prev_month_data = [
+            w for w in flat_weeks if w[0] == prev_year and w[1] == prev_month
         ]
 
-        return {"daily": last7_daily, "weekly": last6_weekly}
+        # 🔹 Logic: 2+ weeks → use only this month; else → include 1 previous
+        if len(this_month) >= 2:
+            selected = this_month
+        else:
+            selected = (prev_month_data[-1:] if prev_month_data else []) + this_month
+
+        weekly_predictions = [
+            {"year": yy, "month": f"{mm:02d}", "week": f"{ww:02d}", "data": payload}
+            for yy, mm, ww, payload in selected
+        ]
+
+        return {"daily": last7_daily, "weekly": weekly_predictions}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
