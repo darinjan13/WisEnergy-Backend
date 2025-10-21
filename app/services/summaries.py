@@ -379,12 +379,12 @@ def total_energy_consumption():
     now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
     target_dt = now_ph - timedelta(days=1)
     target_date = target_dt.strftime("%Y-%m-%d")
-    is_monday = now_ph.weekday() == 0
-    y = str((now_ph - timedelta(days=1)).year)
-    m = f"{(now_ph - timedelta(days=1)).month:02d}"
+    y = str(target_dt.year)
+    m = f"{target_dt.month:02d}"
 
     print("📊 Calculating totals...")
 
+    # ---- DAILY + MONTHLY TOTALS ----
     daily_root = db.reference("/daily_summary").get() or {}
     for user_id, devices in daily_root.items():
         total_kwh_daily = 0.0
@@ -392,21 +392,26 @@ def total_energy_consumption():
             for appliance in (device or {}).values():
                 summary = (appliance or {}).get(target_date)
                 if summary:
-                    total_kwh_daily += float(summary.get("total_kWh", 0.0))
+                    try:
+                        total_kwh_daily += float(summary.get("total_kWh", 0.0))
+                    except (ValueError, TypeError):
+                        continue
 
+        # Daily total
         db.reference(f"/daily_total_consumption/{user_id}/{target_date}").set(
             {
                 "total_energy_consumption": round(total_kwh_daily, 2),
                 "updated_at": now_str,
             }
         )
+
+        # Monthly total (Month-to-Date)
         monthly_total = (
             db.reference(
                 f"/monthly_total_consumption/{user_id}/{y}/{m}/total_energy_consumption"
             ).get()
-            or 0
+            or 0.0
         )
-
         db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").update(
             {
                 "total_energy_consumption": round(monthly_total + total_kwh_daily, 2),
@@ -414,30 +419,51 @@ def total_energy_consumption():
             }
         )
 
-    # ---- WEEKLY TOTAL (previous Mon–Sun; Monday-owned bucket) ----
-    if is_monday:
-        prev_week_end = now_ph - timedelta(days=1)  # Sunday (yesterday)
-        prev_week_start = prev_week_end - timedelta(days=6)  # Monday of last week
-        yw = str(prev_week_start.year)
-        mw = f"{prev_week_start.month:02d}"
-        ww = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
+    # ---- WEEKLY TOTAL (updated daily, grouped Monday–Sunday) ----
+    week_start = (now_ph - timedelta(days=now_ph.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )  # Monday of current week
+    week_end = week_start + timedelta(days=6)  # Sunday
+    yw = str(week_start.year)
+    mw = f"{week_start.month:02d}"
+    ww = f"{((week_start.day - 1) // 7) + 1:02d}"
 
-        weekly_root = db.reference("/weekly_summary").get() or {}
-        for user_id, devices in weekly_root.items():
-            user_total = 0.0
-            for device_vals in (devices or {}).values():
-                for appl_vals in (device_vals or {}).values():
-                    bucket = (appl_vals or {}).get(yw, {}).get(mw, {}).get(ww)
-                    if bucket:
-                        user_total += float(bucket.get("total_kWh", 0.0))
+    print(
+        f"🗓️ Updating weekly total ({week_start.strftime('%Y-%m-%d')} → {week_end.strftime('%Y-%m-%d')})"
+    )
 
-            db.reference(f"/weekly_total_consumption/{user_id}/{yw}/{mw}/{ww}").set(
-                {
-                    "start_date": prev_week_start.strftime("%Y-%m-%d"),
-                    "end_date": prev_week_end.strftime("%Y-%m-%d"),
-                    "total_energy_consumption": round(user_total, 2),
-                    "updated_at": now_str,
-                }
-            )
+    weekly_root = db.reference("/weekly_summary").get() or {}
+    all_user_ids = list(weekly_root.keys())
 
-    print("✅ Totals updated (Daily + conditional Weekly + Monthly MTD).")
+    # Ensure all users have at least an empty bucket
+    if not all_user_ids and daily_root:
+        all_user_ids = list(daily_root.keys())
+
+    for user_id in all_user_ids:
+        user_total = 0.0
+        devices = (weekly_root.get(user_id) or {}).values()
+
+        for device_vals in devices:
+            for appl_vals in (device_vals or {}).values():
+                week_bucket = (appl_vals or {}).get(yw, {}).get(mw, {}).get(ww)
+                if week_bucket:
+                    try:
+                        user_total += float(week_bucket.get("total_kWh", 0.0))
+                    except (ValueError, TypeError):
+                        continue
+
+        # Create week folder even if 0.0
+        db.reference(f"/weekly_total_consumption/{user_id}/{yw}/{mw}/{ww}").set(
+            {
+                "start_date": week_start.strftime("%Y-%m-%d"),
+                "end_date": week_end.strftime("%Y-%m-%d"),
+                "total_energy_consumption": round(user_total, 2),
+                "updated_at": now_str,
+            }
+        )
+
+        print(
+            f"✅ Weekly total updated for {user_id}: {round(user_total, 2)} kWh ({yw}/{mw}/{ww})"
+        )
+
+    print("✅ Totals updated (Daily + Weekly + Monthly, with zero-filled weeks).")

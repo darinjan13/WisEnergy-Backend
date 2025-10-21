@@ -20,6 +20,7 @@ from .routes import (
     notifications,
     predictions,
     rates,
+    paymongo,
 )
 
 app = FastAPI()
@@ -44,6 +45,7 @@ app.include_router(recommendations.router)
 app.include_router(notifications.router)
 app.include_router(predictions.router)
 app.include_router(rates.router)
+app.include_router(paymongo.router)
 
 
 @app.get("/")
