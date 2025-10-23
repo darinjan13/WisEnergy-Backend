@@ -23,10 +23,9 @@ def add_or_update_rate(rate_req: RateRequest):
     Example path: /city/Mandaue_City/2025/09
     """
     try:
+        month = rate_req.month.split("-")[-1]
         city_name = rate_req.city.replace(" ", "_")
-        ref = db.reference(
-            f"/city/{city_name}/{rate_req.year}/{rate_req.month.zfill(2)}"
-        )
+        ref = db.reference(f"/city/{city_name}/{rate_req.year}/{month.zfill(2)}")
 
         payload = {
             "rate": rate_req.rate,
