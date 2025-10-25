@@ -26,7 +26,7 @@ from .routes import (
 app = FastAPI()
 
 # CORS
-origins = ["http://localhost:5173"]
+origins = ["http://localhost:5173", "https://wisenergy.netlify.app/"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
