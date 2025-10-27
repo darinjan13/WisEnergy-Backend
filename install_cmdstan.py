@@ -4,25 +4,38 @@ import os
 import sys
 
 
-def install():
-    if cmdstanpy.cmdstan_path():
-        print(f"CmdStan already at: {cmdstanpy.cmdstan_path()}")
-        return
+def main():
+    # Safely check if CmdStan is already installed
+    try:
+        path = cmdstanpy.cmdstan_path()
+        if path and os.path.exists(os.path.join(path, "bin", "stanc")):
+            print(f"CmdStan already installed at: {path}")
+            return
+    except ValueError:
+        # This is expected if no installation exists
+        pass
 
-    print("Installing CmdStan (this may take 1-2 minutes)...")
+    print(
+        "No CmdStan installation found. Installing CmdStan 2.33.1 (this may take 1-2 minutes)..."
+    )
     try:
         success = cmdstanpy.install_cmdstan(
-            version="2.33.1", cores=2, verbose=True  # Compatible with cmdstanpy 1.1.0
+            dir=None,  # Use default location
+            version="2.33.1",  # Compatible with cmdstanpy 1.1.0
+            cores=2,
+            verbose=True,
+            progress=True,
+            overwrite=False,  # Don't overwrite if exists
         )
         if success:
-            print("CmdStan installed successfully!")
+            print(f"CmdStan installed successfully to: {cmdstanpy.cmdstan_path()}")
         else:
-            print("CmdStan install failed.")
+            print("CmdStan installation failed!")
             sys.exit(1)
     except Exception as e:
-        print(f"CmdStan install error: {e}")
+        print(f"Error during CmdStan installation: {e}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    install()
+    main()
