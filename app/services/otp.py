@@ -31,7 +31,7 @@ def send_otp_email(to_email: str, otp: str, userVerification: bool):
         )
 
     message = Mail(
-        from_email=EMAIL_ADDRESS,
+        from_email="noreply@wisenergy.site",
         to_emails=to_email,
         subject=subject,
         plain_text_content=body,

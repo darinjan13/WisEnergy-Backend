@@ -40,7 +40,7 @@ def compute_status(start_str: str, plan_type: str):
     }
 
 
-@router.get("/")
+@router.get("/subscriptions")
 def list_subscriptions():
     """Return all subscriptions formatted for admin dashboard."""
     subs = db.reference("/subscriptions").get() or {}
