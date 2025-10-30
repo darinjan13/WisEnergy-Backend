@@ -4,8 +4,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .utils.timezone import PH_TZ
 from .services.summaries import (
     hourly_summary_update,
-    weekly_summary_aggregation,
-    total_energy_consumption,
 )
 from .services.predictions import scheduled_prediction_update
 
@@ -26,7 +24,7 @@ from .routes import (
 app = FastAPI()
 
 # CORS
-origins = ["http://localhost:5173", "https://wisenergy.netlify.app"]
+origins = ["http://localhost:5173", "https://wisenergy.site"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -62,11 +60,8 @@ def ping(request: Request):
 
 # Scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(weekly_summary_aggregation, "cron", hour=0, minute=5, timezone=PH_TZ)
-scheduler.add_job(total_energy_consumption, "cron", hour=0, minute=10, timezone=PH_TZ)
 scheduler.add_job(
     scheduled_prediction_update, "cron", hour=0, minute=20, timezone=PH_TZ
 )
 scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
-# scheduler.add_job(check_scheduled_deletions, "cron", hour=0, minute=30, timezone=PH_TZ)
 scheduler.start()

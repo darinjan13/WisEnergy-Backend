@@ -46,51 +46,139 @@ def notify_user(uid: str, title: str, body: str, data: dict | None = None):
         )
 
 
-def save_notification(user_id, title, message, ntype="system"):
+def save_notification(user_id, title, message, ntype="system", appliance=None):
     try:
+        payload = {
+            "title": title,
+            "message": message,
+            "type": ntype,
+            "created_at": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "read_at": None,
+        }
+        if appliance:
+            payload["appliance"] = appliance
+
         notif_ref = db.reference(f"/notifications/{user_id}")
-        notif_ref.push(
-            {
-                "title": title,
-                "message": message,
-                "type": ntype,
-                "created_at": datetime.now(PH_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-                "read_at": None,
-            }
-        )
+        notif_ref.push(payload)
         print(f"💾 Notification saved for {user_id}")
     except Exception as e:
         print(f"⚠️ Failed to save notification for {user_id}: {e}")
 
 
-def can_send_alert(user_id: str, appliance: str, now_ph: datetime, db):
+def can_send_alert(user_id: str, appliance: str, now_ph: datetime, db) -> bool:
     """
-    Check if a high usage alert can be sent (cooldown of 4 hours per appliance).
-
-    Args:
-        user_id (str): User ID.
-        appliance (str): Appliance name.
-        now_ph (datetime): Current timestamp in PH timezone.
-        db: Database reference.
-
-    Returns:
-        bool: True if an alert can be sent, False if within cooldown.
+    Determines if a high-usage alert for a specific appliance can be sent.
+    Prevents duplicates within a 4-hour cooldown window.
     """
-    last_alert = (
-        db.reference(f"/notifications/{user_id}")
-        .order_by_child("appliance")
-        .equal_to(appliance)
-        .order_by_child("created_at")
-        .limit_to_last(1)
-        .get()
+    try:
+        notif_ref = (
+            db.reference(f"/notifications/{user_id}")
+            .order_by_child("created_at")
+            .limit_to_last(20)  # small batch for performance
+        )
+        recent_notifs = notif_ref.get() or {}
+
+        for n in reversed(list(recent_notifs.values())):
+            if n.get("type") == "high_usage_alert" and n.get("appliance") == appliance:
+                last_time = n.get("created_at")
+                last_dt = datetime.strptime(last_time, "%Y-%m-%d %H:%M:%S")
+                diff_hr = (now_ph - last_dt).total_seconds() / 3600
+                if diff_hr < 4:
+                    print(f"⏳ Cooldown active for {appliance}: {diff_hr:.2f}h ago")
+                    return False
+                break
+        return True
+
+    except Exception as e:
+        print(f"⚠️ Error checking cooldown for {appliance}: {e}")
+        return True  # fail-open to avoid blocking all alerts
+
+
+def already_notified_this_month(user_id: str, notif_type: str) -> bool:
+    """
+    Check if a notification of the given type was already sent this month.
+    Prevents duplicate budget alerts.
+    """
+    try:
+        notif_ref = db.reference(f"/notifications/{user_id}")
+        notifications = notif_ref.get() or {}
+        current_month = datetime.now(PH_TZ).strftime("%Y-%m")
+
+        for n in notifications.values():
+            if n.get("type") == notif_type and n.get("created_at", "").startswith(
+                current_month
+            ):
+                return True
+        return False
+    except Exception as e:
+        print(f"⚠️ Error checking duplicate notification for {user_id}: {e}")
+        return False
+
+
+def check_budget_threshold(user_id: str, total_kwh: float):
+    """
+    Checks the user's real-time monthly energy consumption against their set budget (in kWh),
+    based on the structure:
+    /user_monthly_budget/{uid}/{year}/{month}/budget_kwh
+    """
+    try:
+        now = datetime.now(PH_TZ)
+        y, m = str(now.year), f"{now.month:02d}"
+
+        # 🔹 Fetch budget entry from user_monthly_budget
+        budget_ref = db.reference(f"/user_monthly_budget/{user_id}/{y}/{m}")
+        budget_data = budget_ref.get() or {}
+
+        user_budget_kwh = float(budget_data.get("budget_kwh", 0.0))
+        if user_budget_kwh <= 0:
+            print(f"ℹ️ No active budget found for {user_id} ({y}-{m})")
+            return
+
+        progress = (total_kwh / user_budget_kwh) * 100
+        print(
+            f"📊 [Budget Check] {user_id}: {progress:.2f}% used ({total_kwh:.2f} / {user_budget_kwh:.2f} kWh)"
+        )
+
+        if progress >= 120 and not already_notified_this_month(user_id, "budget_120"):
+            _send_budget_alert(
+                user_id,
+                "🚨 Over Budget",
+                "You’ve exceeded your monthly energy budget.",
+                "budget_120",
+            )
+        elif progress >= 100 and not already_notified_this_month(user_id, "budget_100"):
+            _send_budget_alert(
+                user_id,
+                "❗ Budget Limit Reached",
+                "You’ve reached your monthly energy limit.",
+                "budget_100",
+            )
+        elif progress >= 80 and not already_notified_this_month(user_id, "budget_80"):
+            _send_budget_alert(
+                user_id,
+                "⚠️ Budget Alert",
+                "You’ve used 80% of your monthly energy budget.",
+                "budget_80",
+            )
+
+    except Exception as e:
+        print(f"⚠️ Error in budget threshold check for {user_id}: {e}")
+
+
+def _send_budget_alert(user_id: str, title: str, message: str, ntype: str):
+    """
+    Internal helper for budget notifications: sends both push and database notification.
+    """
+    notify_user(
+        uid=user_id,
+        title=title,
+        body=message,
+        data={"screen": "notifications", "type": ntype},
     )
-    if last_alert:
-        last_alert_time = list(last_alert.values())[0].get("created_at")
-        try:
-            last_alert_dt = datetime.strptime(last_alert_time, "%Y-%m-%d %H:%M:%S")
-            if (now_ph - last_alert_dt).total_seconds() < 4 * 3600:
-                print(f"⏳ Cooldown active for {appliance} alert for {user_id}")
-                return False
-        except Exception as e:
-            print(f"⚠️ Error checking cooldown for {appliance}: {e}")
-    return True
+    save_notification(
+        user_id=user_id,
+        title=title,
+        message=message,
+        ntype=ntype,
+    )
+    print(f"📬 Budget alert ({ntype}) sent to {user_id}")

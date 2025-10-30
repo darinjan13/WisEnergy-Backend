@@ -1,8 +1,13 @@
 from datetime import datetime, timedelta
 from ..utils.firebase import db
 from ..utils.timezone import PH_TZ
-from .notifications import notify_user, save_notification, can_send_alert
-from .recommendations import generate_4hour_recommendation, detect_high_usage_peaks
+from .notifications import (
+    check_budget_threshold,
+    notify_user,
+    save_notification,
+    can_send_alert,
+)
+from .recommendations import detect_high_usage_peaks
 from statistics import mean
 import random
 
@@ -171,8 +176,52 @@ def hourly_summary_update():
                             "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
                         }
                     )
+                    check_budget_threshold(user_id, new_monthly_kwh)
                 except Exception as e:
                     print(f"⚠️ Failed monthly_summary {appliance_name}: {e}")
+
+                # --- MONTHLY TOTAL CONSUMPTION ---
+                try:
+                    monthly_total_ref = db.reference(
+                        f"/monthly_total_consumption/{user_id}/{y_month}/{m_month}/total_energy_consumption"
+                    )
+                    existing_monthly_total = monthly_total_ref.get() or 0.0
+                    new_monthly_total = round(
+                        float(existing_monthly_total) + total_kwh_hour, 6
+                    )
+                    db.reference(
+                        f"/monthly_total_consumption/{user_id}/{y_month}/{m_month}"
+                    ).update(
+                        {
+                            "total_energy_consumption": new_monthly_total,
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                    check_budget_threshold(user_id, new_monthly_total)
+                except Exception as e:
+                    print(f"⚠️ Failed monthly_total update for {user_id}: {e}")
+
+                # --- WEEKLY TOTAL CONSUMPTION ---
+                try:
+                    weekly_total_ref = db.reference(
+                        f"/weekly_total_consumption/{user_id}/{y}/{m}/{w}/total_energy_consumption"
+                    )
+                    existing_weekly_total = weekly_total_ref.get() or 0.0
+                    new_weekly_total = round(
+                        float(existing_weekly_total) + total_kwh_hour, 6
+                    )
+                    db.reference(
+                        f"/weekly_total_consumption/{user_id}/{y}/{m}/{w}"
+                    ).update(
+                        {
+                            "total_energy_consumption": new_weekly_total,
+                            "start_date": week_start.strftime("%Y-%m-%d"),
+                            "end_date": week_end.strftime("%Y-%m-%d"),
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed weekly_total update for {user_id}: {e}")
 
                 # --- APPLIANCE LATEST KWH ---
                 try:
@@ -260,10 +309,12 @@ def hourly_summary_update():
                 kwh = float(peak.get("kWh", 0))
                 hour = peak.get("hour")
 
-                # Recompute non-max mean for consistency
+                # Recompute non-max mean safely
                 hourly_items = user_data.get(app, {}).get("hourly", {})
                 hourly_kwh = list(hourly_items.values())
-                non_max_kwh = [val for val in hourly_kwh if val != kwh]
+                non_max_kwh = hourly_kwh.copy()
+                if kwh in non_max_kwh:
+                    non_max_kwh.remove(kwh)
                 base = mean(non_max_kwh) if non_max_kwh else 0
 
                 if (
@@ -271,199 +322,32 @@ def hourly_summary_update():
                     and kwh >= base * 2.0
                     and can_send_alert(user_id, app, now_ph, db)
                 ):
-                    msg = f"{app} peaked at {kwh:.2f} kWh at {hour} (avg excluding peak ≈ {base:.2f})."
+                    msg = (
+                        f"{app} peaked at {kwh:.2f} kWh at {hour} "
+                        f"(avg excluding peak ≈ {base:.2f})."
+                    )
+
+                    # 🔔 Send push
                     notify_user(
                         uid=user_id,
                         title=f"⚠️ High Usage Alert: {app}",
                         body=msg,
-                        data={"screen": "notifications", "type": "high_usage_alert"},
+                        data={
+                            "screen": "notifications",
+                            "type": "high_usage_alert",
+                            "appliance": app,
+                        },
                     )
+
+                    # 💾 Save to Firebase
                     save_notification(
                         user_id=user_id,
                         title=f"⚠️ High Usage Alert: {app}",
                         message=msg,
                         ntype="high_usage_alert",
+                        appliance=app,
                     )
-                    print(f"⚡ Sent high usage alert for {app} to {user_id}")
+
+                    print(f"⚡ Sent high-usage alert for {app} to {user_id}")
 
     print("🎉 Hourly summaries and AI-driven notifications complete.")
-
-
-def weekly_summary_aggregation():
-    """
-    Aggregate daily_summary into weekly_summary for the previous week (Monday to Sunday),
-    running on Mondays. Always create a weekly_summary entry for each user/device/appliance,
-    even if no daily_summary data exists (total_kWh = 0.0).
-    """
-    now_ph = datetime.now(PH_TZ)
-    now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
-
-    # Only run weekly aggregation on Mondays
-    if now_ph.weekday() != 0:
-        print("⚠️ Not Monday, skipping weekly aggregation.")
-        return
-
-    prev_week_end = now_ph - timedelta(days=1)  # Sunday
-    prev_week_start = prev_week_end - timedelta(days=6)  # Monday
-    y = str(prev_week_start.year)
-    m = f"{prev_week_start.month:02d}"
-    w = f"{((prev_week_start.day - 1) // 7) + 1:02d}"
-
-    # Collect all days in last week
-    days = [
-        (prev_week_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)
-    ]
-
-    print(f"📊 Starting weekly aggregation for {days[0]} → {days[-1]}")
-
-    # Get all users, devices, and appliances from /appliances or /daily_summary
-    appliances_root = db.reference("/appliances").get() or {}
-    daily_root = db.reference("/daily_summary").get() or {}
-
-    # Combine user/device/appliance combinations from both paths
-    combinations = set()
-    for user_id, devices in appliances_root.items():
-        for device_id, appliances in devices.items():
-            for appliance_name in appliances.keys():
-                combinations.add((user_id, device_id, appliance_name))
-    for user_id, devices in daily_root.items():
-        for device_id, appliances in devices.items():
-            for appliance_name in appliances.keys():
-                combinations.add((user_id, device_id, appliance_name))
-
-    if not combinations:
-        print("⚠️ No appliances found for aggregation.")
-        return
-
-    for user_id, device_id, appliance_name in combinations:
-        total_kwh_week = 0.0
-
-        # Sum from daily_summary
-        for d in days:
-            summary = db.reference(
-                f"/daily_summary/{user_id}/{device_id}/{appliance_name}/{d}"
-            ).get()
-            if summary:
-                try:
-                    total_kwh_week += float(summary.get("total_kWh", 0.0))
-                except (ValueError, TypeError):
-                    continue
-
-        # Save into weekly_summary, even if total_kWh is 0.0
-        weekly_ref = db.reference(
-            f"/weekly_summary/{user_id}/{device_id}/{appliance_name}/{y}/{m}/{w}"
-        )
-        try:
-            weekly_ref.set(
-                {
-                    "total_kWh": round(total_kwh_week, 6),
-                    "start_date": prev_week_start.strftime("%Y-%m-%d"),
-                    "end_date": prev_week_end.strftime("%Y-%m-%d"),
-                    "updated_at": now_str,
-                }
-            )
-            print(
-                f"✅ Weekly summary updated for {appliance_name} ({user_id}): total_kWh={round(total_kwh_week, 6)}"
-            )
-        except Exception as e:
-            print(
-                f"⚠️ Failed to update weekly_summary for {appliance_name} ({user_id}): {e}"
-            )
-            continue
-
-    print("🎉 Weekly aggregation completed.")
-
-
-def total_energy_consumption():
-    now_ph = datetime.now(PH_TZ)
-    now_str = now_ph.strftime("%Y-%m-%d %H:%M:%S")
-    target_dt = now_ph - timedelta(days=1)
-    target_date = target_dt.strftime("%Y-%m-%d")
-    y = str(target_dt.year)
-    m = f"{target_dt.month:02d}"
-
-    print("📊 Calculating totals...")
-
-    # ---- DAILY + MONTHLY TOTALS ----
-    daily_root = db.reference("/daily_summary").get() or {}
-    for user_id, devices in daily_root.items():
-        total_kwh_daily = 0.0
-        for device in (devices or {}).values():
-            for appliance in (device or {}).values():
-                summary = (appliance or {}).get(target_date)
-                if summary:
-                    try:
-                        total_kwh_daily += float(summary.get("total_kWh", 0.0))
-                    except (ValueError, TypeError):
-                        continue
-
-        # Daily total
-        db.reference(f"/daily_total_consumption/{user_id}/{target_date}").set(
-            {
-                "total_energy_consumption": round(total_kwh_daily, 2),
-                "updated_at": now_str,
-            }
-        )
-
-        # Monthly total (Month-to-Date)
-        monthly_total = (
-            db.reference(
-                f"/monthly_total_consumption/{user_id}/{y}/{m}/total_energy_consumption"
-            ).get()
-            or 0.0
-        )
-        db.reference(f"/monthly_total_consumption/{user_id}/{y}/{m}").update(
-            {
-                "total_energy_consumption": round(monthly_total + total_kwh_daily, 2),
-                "updated_at": now_str,
-            }
-        )
-
-    # ---- WEEKLY TOTAL (updated daily, grouped Monday–Sunday) ----
-    week_start = (now_ph - timedelta(days=now_ph.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )  # Monday of current week
-    week_end = week_start + timedelta(days=6)  # Sunday
-    yw = str(week_start.year)
-    mw = f"{week_start.month:02d}"
-    ww = f"{((week_start.day - 1) // 7) + 1:02d}"
-
-    print(
-        f"🗓️ Updating weekly total ({week_start.strftime('%Y-%m-%d')} → {week_end.strftime('%Y-%m-%d')})"
-    )
-
-    weekly_root = db.reference("/weekly_summary").get() or {}
-    all_user_ids = list(weekly_root.keys())
-
-    # Ensure all users have at least an empty bucket
-    if not all_user_ids and daily_root:
-        all_user_ids = list(daily_root.keys())
-
-    for user_id in all_user_ids:
-        user_total = 0.0
-        devices = (weekly_root.get(user_id) or {}).values()
-
-        for device_vals in devices:
-            for appl_vals in (device_vals or {}).values():
-                week_bucket = (appl_vals or {}).get(yw, {}).get(mw, {}).get(ww)
-                if week_bucket:
-                    try:
-                        user_total += float(week_bucket.get("total_kWh", 0.0))
-                    except (ValueError, TypeError):
-                        continue
-
-        # Create week folder even if 0.0
-        db.reference(f"/weekly_total_consumption/{user_id}/{yw}/{mw}/{ww}").set(
-            {
-                "start_date": week_start.strftime("%Y-%m-%d"),
-                "end_date": week_end.strftime("%Y-%m-%d"),
-                "total_energy_consumption": round(user_total, 2),
-                "updated_at": now_str,
-            }
-        )
-
-        print(
-            f"✅ Weekly total updated for {user_id}: {round(user_total, 2)} kWh ({yw}/{mw}/{ww})"
-        )
-
-    print("✅ Totals updated (Daily + Weekly + Monthly, with zero-filled weeks).")

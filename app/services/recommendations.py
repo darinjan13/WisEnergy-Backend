@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from datetime import datetime
 from ..config import client_gemini
 from ..utils.firebase import db
+from statistics import mean
 
 
 def generate_4hour_recommendation(user_data: dict):
@@ -131,41 +132,42 @@ def fetch_user_data(user_id: str, date: datetime):
     return result
 
 
-from statistics import mean
-
-
 def detect_high_usage_peaks(user_data: dict):
     """
-    Detect high usage peaks in the 4-hour window for each appliance using only user_data.
+    Detects high-usage peaks per appliance in the last 4-hour window.
 
-    Args:
-        user_data (dict): Dictionary with appliance names as keys and hourly kWh data.
-
-    Returns:
-        list: Peaks [{"appliance": str, "hour": str, "kWh": float}] where max kWh exceeds
-              twice the mean of non-max hours.
+    A peak is defined when the max kWh is >= 2× the average (excluding the peak itself)
+    and above a 0.1 kWh threshold.
+    Returns a list of dicts: [{"appliance": str, "hour": str, "kWh": float}].
     """
     peaks = []
+    THRESHOLD_MULTIPLIER = 2.0
+    MIN_THRESHOLD_KWH = 0.1
 
     for app, details in user_data.items():
         hourly_items = details.get("hourly", {})
         hourly_kwh = list(hourly_items.values())
-        if len(hourly_kwh) < 2:  # Need at least 2 hours for meaningful baseline
+        if len(hourly_kwh) < 2:
             continue
 
-        # Find max kWh and its hour
         max_kwh = max(hourly_kwh)
-        max_hour = next(hour for hour, kwh in hourly_items.items() if kwh == max_kwh)
+        max_hours = [hour for hour, kwh in hourly_items.items() if kwh == max_kwh]
 
-        # Baseline: mean excluding the max kWh (to detect isolated spikes)
-        non_max_kwh = [kwh for kwh in hourly_kwh if kwh != max_kwh]
+        non_max_kwh = hourly_kwh.copy()
+        if max_kwh in non_max_kwh:
+            non_max_kwh.remove(max_kwh)
         base = mean(non_max_kwh) if non_max_kwh else 0
 
-        # Flag as high usage if max >= 2 * baseline and above min threshold
-        if base > 0 and max_kwh >= base * 2.0 and max_kwh >= 0.1:
-            peaks.append({"appliance": app, "hour": max_hour, "kWh": max_kwh})
-            print(
-                f"📈 Detected peak for {app}: {max_kwh:.2f} kWh at {max_hour} (baseline avg excluding peak ≈ {base:.2f})"
-            )
+        if (
+            base > 0
+            and max_kwh >= base * THRESHOLD_MULTIPLIER
+            and max_kwh >= MIN_THRESHOLD_KWH
+        ):
+            for hour in max_hours:
+                peaks.append({"appliance": app, "hour": hour, "kWh": max_kwh})
+                print(
+                    f"📈 Peak detected for {app} — {max_kwh:.2f} kWh at {hour} "
+                    f"(baseline ≈ {base:.2f}, threshold × {THRESHOLD_MULTIPLIER})"
+                )
 
     return peaks
