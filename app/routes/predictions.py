@@ -21,6 +21,28 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
         all_daily = daily_ref.get() or {}
         last5_daily = {d: all_daily[d] for d in sorted(all_daily.keys())[-5:]}
 
+        # ---------- MONTHLY (current year, all months) ----------
+        now_month = datetime.now()
+        current_year_month = now_month.year
+
+        monthly_ref = db.reference(
+            f"/predictions/{user_id}/{device_id}/{appliance_name}/monthly/{current_year_month}"
+        )
+        year_data = monthly_ref.get() or {}
+
+        monthly_list = []
+        for mm in range(1, 12 + 1):
+            key = f"{mm:02d}"
+            payload = year_data.get(key) or {}
+            monthly_list.append(
+                {
+                    "year": current_year_month,
+                    "month": key,
+                    "predicted_kWh": payload.get("predicted_kWh", 0),
+                    "timestamp": payload.get("timestamp", ""),
+                }
+            )
+
         # ---------- WEEKLY ----------
         weekly_ref = db.reference(
             f"/predictions/{user_id}/{device_id}/{appliance_name}/weekly"
@@ -28,7 +50,7 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
         all_weekly = weekly_ref.get() or {}
 
         if not all_weekly:
-            return {"daily": last5_daily, "weekly": []}
+            return {"daily": last5_daily, "weekly": [], "monthly": monthly_list}
 
         flat_weeks = []
         for yy, months in all_weekly.items():
@@ -38,7 +60,7 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
         flat_weeks.sort(key=lambda x: (x[0], x[1], x[2]))
 
         if not flat_weeks:
-            return {"daily": last5_daily, "weekly": []}
+            return {"daily": last5_daily, "weekly": [], "monthly": monthly_list}
 
         # 🔹 Determine current & previous month
         now = datetime.now()
@@ -65,7 +87,7 @@ def predict_and_return_history(user_id: str, device_id: str, appliance_name: str
             for yy, mm, ww, payload in selected
         ]
 
-        return {"daily": last5_daily, "weekly": last_weeks}
+        return {"daily": last5_daily, "weekly": last_weeks, "monthly": monthly_list}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -80,6 +102,28 @@ def predict_total_and_return_history(user_id: str):
         all_daily = daily_ref.get() or {}
         last7_daily = {d: all_daily[d] for d in sorted(all_daily.keys())[-7:]}
 
+        # ---------- MONTHLY TOTAL (current year, all months) ----------
+        now_month = datetime.now()
+        current_year_month = now_month.year
+
+        monthly_ref = db.reference(
+            f"/predictions/{user_id}/total_consumption/monthly/{current_year_month}"
+        )
+        year_data = monthly_ref.get() or {}
+
+        monthly_list = []
+        for mm in range(1, 12 + 1):
+            key = f"{mm:02d}"
+            payload = year_data.get(key) or {}
+            monthly_list.append(
+                {
+                    "year": current_year_month,
+                    "month": key,
+                    "predicted_kWh": payload.get("predicted_kWh", 0),
+                    "timestamp": payload.get("timestamp", ""),
+                }
+            )
+
         # ---------- WEEKLY TOTAL ----------
         weekly_ref = db.reference(f"/predictions/{user_id}/total_consumption/weekly")
         all_weekly = weekly_ref.get() or {}
@@ -92,7 +136,11 @@ def predict_total_and_return_history(user_id: str):
         flat_weeks.sort(key=lambda x: (x[0], x[1], x[2]))
 
         if not flat_weeks:
-            return {"daily": last7_daily, "weekly": []}
+            return {
+                "daily": last7_daily,
+                "weekly": [],
+                "monthly": monthly_list,
+            }
 
         # 🔹 Current and previous month check
         now = datetime.now()
@@ -107,7 +155,7 @@ def predict_total_and_return_history(user_id: str):
             w for w in flat_weeks if w[0] == prev_year and w[1] == prev_month
         ]
 
-        # 🔹 Logic: 2+ weeks → use only this month; else → include 1 previous
+        # 🔹 Logic: 2+ weeks → use only this month. else → include 1 previous
         if len(this_month) >= 2:
             selected = this_month
         else:
@@ -118,7 +166,11 @@ def predict_total_and_return_history(user_id: str):
             for yy, mm, ww, payload in selected
         ]
 
-        return {"daily": last7_daily, "weekly": weekly_predictions}
+        return {
+            "daily": last7_daily,
+            "weekly": weekly_predictions,
+            "monthly": monthly_list,
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
