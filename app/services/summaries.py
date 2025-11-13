@@ -231,8 +231,10 @@ def hourly_summary_update():
                     app_data = app_ref.get() or {}
                     prev_total = float(app_data.get("latest_kwh", 0.0))
                     app_ref.update(
-                        {"latest_kwh": round(prev_total + total_kwh_hour, 6),
-                         "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S")}
+                        {
+                            "latest_kwh": round(prev_total + total_kwh_hour, 6),
+                            "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
                     )
                 except Exception as e:
                     print(f"⚠️ Failed latest_kwh update {appliance_name}: {e}")
@@ -243,24 +245,31 @@ def hourly_summary_update():
         print("⏩ Skipping AI insights this hour.")
         return
 
-    for user_id in users:
+    daily_users = db.reference("/daily_summary").get(shallow=True) or {}
+    if not daily_users:
+        print("⚠️ No daily_summary data, cannot build AI notifications.")
+        return
+
+    for user_id in daily_users:
         # Gather last 4-hour window
         prev_hrs = [(prev_hour - timedelta(hours=i)) for i in range(4)]
         user_data = {}
+        user_daily = db.reference(f"/daily_summary/{user_id}").get() or {}
 
-        for device_id in db.reference(f"/usage/{user_id}").get(shallow=True) or {}:
-            for app in (
-                db.reference(f"/usage/{user_id}/{device_id}").get(shallow=True) or {}
-            ):
-                if app not in user_data:
-                    user_data[app] = {"hourly": {}}
+        for device_id, appliances in user_daily.items():
+            for app_name, dates in (appliances or {}).items():
+                if app_name not in user_data:
+                    user_data[app_name] = {"hourly": {}}
+
                 for h_dt in prev_hrs:
-                    day_str, h_key = h_dt.strftime("%Y-%m-%d"), h_dt.strftime("%H:00")
-                    kwh = db.reference(
-                        f"/daily_summary/{user_id}/{device_id}/{app}/{day_str}/hourly/{h_key}"
-                    ).get()
+                    day_str = h_dt.strftime("%Y-%m-%d")
+                    h_key = h_dt.strftime("%H:00")
+
+                    day_node = (dates or {}).get(day_str) or {}
+                    hourly_map = day_node.get("hourly") or {}
+                    kwh = hourly_map.get(h_key)
                     if kwh is not None:
-                        user_data[app]["hourly"][h_key] = float(kwh)
+                        user_data[app_name]["hourly"][h_key] = float(kwh)
 
         print(f"User data for {user_id}: {user_data}")
 
