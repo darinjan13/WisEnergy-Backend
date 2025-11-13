@@ -231,7 +231,8 @@ def hourly_summary_update():
                     app_data = app_ref.get() or {}
                     prev_total = float(app_data.get("latest_kwh", 0.0))
                     app_ref.update(
-                        {"latest_kwh": round(prev_total + total_kwh_hour, 6)}
+                        {"latest_kwh": round(prev_total + total_kwh_hour, 6),
+                         "updated_at": now_ph.strftime("%Y-%m-%d %H:%M:%S")}
                     )
                 except Exception as e:
                     print(f"⚠️ Failed latest_kwh update {appliance_name}: {e}")
