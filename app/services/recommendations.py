@@ -79,32 +79,48 @@ def generate_recommendation(user_data: dict):
     prompt = f"""
         Given the energy consumption data: {json.dumps(user_data)},
         provide a JSON response with:
-        1. "peaks": always Identify peak time(), peak kWh and use the appliance name as keys (ignore appliances with no data for today) and dont use device.
-        2. "recommendations": analyze the usage and List at least 3 concise recommendations to reduce energy usage (2-3 sentences each) message only no title.
-        3. "insights": List at least 3 concise analysis base on the usage data (1-2 sentences each) message only no title.
-        Ensure recommendations are practical, and avoid mentioning products.
+        1. "peaks": Identify today's peak usage per appliance using keys as appliance names. Include "peak_time" and "peak_kWh". Ignore appliances with no data.
+        2. "recommendations": Provide at least 3 short recommendations (2-3 sentences each). Message only, no title.
+        3. "insights": Provide at least 3 insights based on usage data (1-2 sentences each). Message only, no title.
+        Only JSON output.
     """
+
     try:
         response = client_gemini.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=prompt,
         )
         cleaned_response = re.sub(r"^```json\n|```$", "", response.text).strip()
-        data = json.loads(cleaned_response)
 
-        if "peaks" in data and isinstance(data["peaks"], dict):
-            formatted = []
-            for appliance, peak in data["peaks"].items():
+        data = json.loads(cleaned_response)
+        peaks = data.get("peaks", {})
+
+        # Prevent crashes by validating peak structure
+        formatted = []
+        if isinstance(peaks, dict):
+            for appliance, peak in peaks.items():
+                # normalize peak to dict
+                if isinstance(peak, dict):
+                    hour = peak.get("peak_time") or peak.get("hour")
+                    kwh = peak.get("peak_kWh") or peak.get("kWh")
+                else:
+                    # if peak is number or anything else, fall back safely
+                    hour = None
+                    kwh = float(peak) if isinstance(peak, (int, float)) else None
+
                 formatted.append(
                     {
                         "appliance": appliance,
-                        "hour": peak.get("peak_time") or peak.get("hour"),
-                        "kWh": peak.get("peak_kWh") or peak.get("kWh"),
+                        "hour": hour,
+                        "kWh": kwh,
                     }
                 )
-            data["peaks"] = formatted
+        else:
+            peaks = []
 
+        data["peaks"] = formatted
         return data
+
     except Exception as e:
         print(f"Error with Gemini: {e}")
         return {"peaks": [], "recommendations": [], "insights": []}
