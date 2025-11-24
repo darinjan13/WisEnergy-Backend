@@ -12,3 +12,4 @@ pydantic[email]
 numpy==1.26.4
 sendgrid
 google-genai
+beautifulsoup4
