@@ -77,7 +77,7 @@ No words. No labels.
 """
 
     result = client_gemini.models.generate_content(
-        model="gemini-2.0-flash-lite",
+        model="gemini-2.5-flash",
         contents=[
             {
                 "role": "user",
