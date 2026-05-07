@@ -1,4 +1,5 @@
 import os
+import json
 from dotenv import load_dotenv
 from google import genai
 from sendgrid import SendGridAPIClient
@@ -11,6 +12,7 @@ SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY")
 PAYMONGO_SECRET_KEY = os.getenv("PAYMONGO_SECRET_KEY")
+FIREBASE_CREDS = json.loads(os.getenv("FIREBASE_CREDS"))
 
 # Initialize Gemini + SendGrid
 client_gemini = genai.Client(api_key=GEMINI_API_KEY)
