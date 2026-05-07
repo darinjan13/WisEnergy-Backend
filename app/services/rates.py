@@ -2,7 +2,6 @@ import requests, json
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from google.genai import types
 from ..config import client_gemini
 from ..utils.firebase import db
 
@@ -183,31 +182,40 @@ def save_rate_if_not_exists(city, year, month, rate):
 # -----------------------------
 def scheduled_rates_update():
     print("[RATES] Starting update...")
+    veco_rate = None
+    meco_rate = None
+    meco_year = 2026
+    meco_month = 5
     
     # MECO
-    print("[RATES] Fetching MECO image...")
-    meco_img, meco_year, meco_month = get_latest_meco_image_bytes()
-    print(f"[RATES] MECO image found: {meco_img is not None}, {meco_year}-{meco_month}")
-    
-    print("[RATES] Extracting MECO rate from image...")
-    meco_rate = extract_meco_rate(meco_img)
-    print(f"[RATES] MECO rate: {meco_rate}")
+    try:
+        print("[RATES] Fetching MECO image...")
+        meco_img, meco_year, meco_month = get_latest_meco_image_bytes()
+        print(f"[RATES] MECO image found: {meco_img is not None}, {meco_year}-{meco_month}")
+        
+        if meco_img:
+            print("[RATES] Extracting MECO rate from image...")
+            meco_rate = extract_meco_rate(meco_img)
+            print(f"[RATES] MECO rate: {meco_rate}")
+        else:
+            print("[RATES] No MECO image found")
+    except Exception as e:
+        print(f"[RATES] MECO error: {e}")
     
     # VECO
-    print("[RATES] Fetching VECO rate...")
-    veco_data = extract_veco_rate()
-    print(f"[RATES] VECO data: {veco_data}")
-    veco_rate = veco_data.get("total_average_rate")
+    try:
+        print("[RATES] Fetching VECO rate...")
+        veco_data = extract_veco_rate()
+        print(f"[RATES] VECO data: {veco_data}")
+        veco_rate = veco_data.get("total_average_rate")
+    except Exception as e:
+        print(f"[RATES] VECO error: {e}")
 
-    now = datetime.now()
-    year = meco_year
-    month = f"{meco_month:02d}"
-
-    # Save MECO → Lapu-Lapu City
-    save_rate_if_not_exists("Lapu-Lapu_City", year, month, meco_rate)
-
-    # Save VECO → Mandaue City
-    save_rate_if_not_exists("Mandaue_City", year, month, veco_rate)
+    # Save even if partial
+    if meco_rate:
+        save_rate_if_not_exists("Lapu-Lapu_City", meco_year, f"{meco_month:02d}", meco_rate)
+    if veco_rate:
+        save_rate_if_not_exists("Mandaue_City", meco_year, f"{meco_month:02d}", veco_rate)
 
     print("[RATES] Done:", {"meco": meco_rate, "veco": veco_rate})
 
