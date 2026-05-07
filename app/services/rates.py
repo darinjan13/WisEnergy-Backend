@@ -100,12 +100,6 @@ No words. No labels.
 # -----------------------------
 def extract_veco_rate():
 
-    schema = types.Schema(
-        type=types.Type.OBJECT,
-        properties={"total_average_rate": types.Schema(type=types.Type.NUMBER)},
-        required=["total_average_rate"],
-    )
-
     prompt = """
 What is the latest VECO (Visayan Electric Company) Cebu residential electricity rate per kWh?
 Return ONLY JSON like this:
@@ -113,13 +107,10 @@ Return ONLY JSON like this:
 Do NOT include code blocks or explanations.
 """
 
-    # call Gemini (without search tool - uses trained knowledge)
+    # call Gemini without search tool - uses trained knowledge
     result = client_gemini.models.generate_content(
         model="gemini-2.5-flash",
         contents=[prompt],
-        config=types.GenerateContentConfig(
-            response_schema=schema, temperature=0.0
-        ),
     )
 
     raw = result.text.strip()
