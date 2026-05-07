@@ -107,18 +107,18 @@ def extract_veco_rate():
     )
 
     prompt = """
-Find the latest VECO (Visayan Electric Company) residential Total Average Rate.
+What is the latest VECO (Visayan Electric Company) Cebu residential electricity rate per kWh?
 Return ONLY JSON like this:
 { "total_average_rate": 12.34 }
 Do NOT include code blocks or explanations.
 """
 
-    # call Gemini
+    # call Gemini (without search tool - uses trained knowledge)
     result = client_gemini.models.generate_content(
         model="gemini-2.5-flash",
         contents=[prompt],
         config=types.GenerateContentConfig(
-            tools=[{"google_search": {}}], response_schema=schema, temperature=0.0
+            response_schema=schema, temperature=0.0
         ),
     )
 
