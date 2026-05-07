@@ -182,9 +182,21 @@ def save_rate_if_not_exists(city, year, month, rate):
 # MAIN
 # -----------------------------
 def scheduled_rates_update():
+    print("[RATES] Starting update...")
+    
+    # MECO
+    print("[RATES] Fetching MECO image...")
     meco_img, meco_year, meco_month = get_latest_meco_image_bytes()
+    print(f"[RATES] MECO image found: {meco_img is not None}, {meco_year}-{meco_month}")
+    
+    print("[RATES] Extracting MECO rate from image...")
     meco_rate = extract_meco_rate(meco_img)
+    print(f"[RATES] MECO rate: {meco_rate}")
+    
+    # VECO
+    print("[RATES] Fetching VECO rate...")
     veco_data = extract_veco_rate()
+    print(f"[RATES] VECO data: {veco_data}")
     veco_rate = veco_data.get("total_average_rate")
 
     now = datetime.now()
