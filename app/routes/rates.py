@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from firebase_admin import db
 from datetime import datetime
+from ..services.rates import scheduled_rates_update
 
 router = APIRouter()
 
@@ -100,5 +101,18 @@ def delete_rate(city: str, year: int, month: str):
             "message": f"Rate for {city} ({year}-{month}) deleted successfully.",
         }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ----- MANUAL UPDATE (FOR TESTING) -----
+@router.post("/rates/update")
+def manual_rates_update():
+    """
+    Manually trigger rates update from MECO and VECO.
+    """
+    try:
+        result = scheduled_rates_update()
+        return {"status": "success", "data": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
