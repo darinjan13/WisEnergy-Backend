@@ -8,6 +8,7 @@ from .services.summaries import (
 from .services.predictions import scheduled_prediction_update
 from .services.rates import scheduled_rates_update
 from .services.firmware import mirror_firmware_job
+from .services.janitor import janitor_delete_processed_hours
 
 # from .services.users import check_scheduled_deletions
 from .routes import (
@@ -71,5 +72,6 @@ scheduler.add_job(
 )
 scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
 scheduler.add_job(mirror_firmware_job, "cron", minute=15, timezone=PH_TZ)
+scheduler.add_job(janitor_delete_processed_hours, "cron", hour=1, minute=30, timezone=PH_TZ)
 scheduler.add_job(scheduled_rates_update, "cron", hour=1, minute=0, timezone=PH_TZ)
 scheduler.start()
