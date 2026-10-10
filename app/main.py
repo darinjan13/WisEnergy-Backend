@@ -7,6 +7,7 @@ from .services.summaries import (
 )
 from .services.predictions import scheduled_prediction_update
 from .services.rates import scheduled_rates_update
+from .services.firmware import mirror_firmware_job
 
 # from .services.users import check_scheduled_deletions
 from .routes import (
@@ -21,6 +22,7 @@ from .routes import (
     rates,
     paymongo,
     subscriptions,
+    firmware as firmware_routes,
 )
 
 app = FastAPI()
@@ -47,6 +49,7 @@ app.include_router(predictions.router)
 app.include_router(rates.router)
 app.include_router(paymongo.router)
 app.include_router(subscriptions.router)
+app.include_router(firmware_routes.router)
 
 
 @app.get("/")
@@ -67,5 +70,6 @@ scheduler.add_job(
     scheduled_prediction_update, "cron", hour=0, minute=20, timezone=PH_TZ
 )
 scheduler.add_job(hourly_summary_update, "cron", minute=0, timezone=PH_TZ)
+scheduler.add_job(mirror_firmware_job, "cron", minute=15, timezone=PH_TZ)
 scheduler.add_job(scheduled_rates_update, "cron", hour=1, minute=0, timezone=PH_TZ)
 scheduler.start()
