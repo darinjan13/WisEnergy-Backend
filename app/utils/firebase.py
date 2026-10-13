@@ -5,7 +5,7 @@ cred = credentials.Certificate(FIREBASE_CREDS)
 initialize_app(
     cred,
     {
-        "databaseURL": "https://wisenergy-11737-default-rtdb.asia-southeast1.firebasedatabase.app/"
+        "databaseURL": "https://capstone-238eb-default-rtdb.asia-southeast1.firebasedatabase.app/"
     },
 )
 
