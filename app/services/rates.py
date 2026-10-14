@@ -70,9 +70,10 @@ def get_latest_meco_image_bytes():
 def extract_meco_rate(image_bytes):
 
     prompt = """
-Extract ONLY the numeric Total Average Rate from the MECO rate image.
-Example output: 11.0864
-No words. No labels.
+From this MECO residential rate table, return ONLY the numeric value on the
+'Average Rate After VAT' row (the total consumers actually pay, e.g. 15.9806).
+Do NOT return the Generation, Distribution, Lifeline, Government, VAT, or
+'Before VAT' rows. No words. No labels. Just the number.
 """
 
     result = client_gemini.models.generate_content(
@@ -88,10 +89,16 @@ No words. No labels.
         ],
     )
 
+    raw = (result.text or "").strip()
     try:
-        return float(result.text.strip())
-    except:
+        rate = float(raw)
+    except Exception:
+        print(f"[RATES] MECO OCR unparseable: {raw!r}")
         return None
+    if not 5.0 <= rate <= 25.0:
+        print(f"[RATES] MECO OCR out of range ({rate}), raw={raw!r}")
+        return None
+    return rate
 
 
 # -----------------------------
