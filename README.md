@@ -58,8 +58,7 @@ WisEnergy-Backend/
 │   │   └── summaries.py
 │   └── utils/               # Utilities
 │       ├── firebase.py
-│       ├── timezone.py
-│       └── serviceAccount.json
+│       └── timezone.py
 ├── requirements.txt
 ├── Procfile
 └── README.md
@@ -82,7 +81,11 @@ SENDGRID_API_KEY=your_sendgrid_api_key
 GEMINI_API_KEY=your_gemini_api_key
 FIREBASE_API_KEY=your_firebase_api_key
 PAYMONGO_SECRET_KEY=your_paymongo_secret_key
+FIREBASE_CREDS={"type":"service_account","project_id":"...","private_key":"..."}
 ```
+
+> Service-account credentials are supplied through the `FIREBASE_CREDS` env var only.
+> Never commit a service-account JSON to the repository.
 
 ## Running Locally
 
