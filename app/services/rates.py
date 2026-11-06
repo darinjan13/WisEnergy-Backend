@@ -1,4 +1,4 @@
-import requests, json
+import requests, json, time
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -19,6 +19,50 @@ MONTH_SLUGS = {
     11: "nov",
     12: "dec",
 }
+
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+]
+
+
+def gemini_generate(contents, attempts_per_model=2):
+    last_error = None
+    for model in GEMINI_MODELS:
+        for attempt in range(attempts_per_model):
+            try:
+                result = client_gemini.models.generate_content(
+                    model=model, contents=contents
+                )
+                print(f"[RATES] Gemini ok via {model}")
+                return result, model
+            except Exception as e:
+                last_error = e
+                message = str(e).lower()
+                transient = any(
+                    token in message
+                    for token in (
+                        "503",
+                        "unavailable",
+                        "429",
+                        "overloaded",
+                        "deadline",
+                        "timeout",
+                    )
+                )
+                print(
+                    f"[RATES] Gemini {model} attempt {attempt + 1} failed: "
+                    f"{type(e).__name__}: {str(e)[:160]}"
+                )
+                if not transient:
+                    break
+                time.sleep(1.5 * (attempt + 1))
+    raise last_error if last_error else RuntimeError("no Gemini model succeeded")
 
 
 # -----------------------------
@@ -50,7 +94,7 @@ def download_image_bytes(url):
     return requests.get(url, timeout=10).content
 
 
-def get_latest_meco_image_bytes():
+def find_latest_meco_image_url():
     today = datetime.now()
     for i in range(12):
         d = today - relativedelta(months=i)
@@ -60,7 +104,7 @@ def get_latest_meco_image_bytes():
             continue
         img_url = extract_image_url(html)
         if img_url:
-            return download_image_bytes(img_url), d.year, d.month
+            return d.year, d.month, img_url
     return None, None, None
 
 
@@ -76,18 +120,18 @@ Do NOT return the Generation, Distribution, Lifeline, Government, VAT, or
 'Before VAT' rows. No words. No labels. Just the number.
 """
 
-    result = client_gemini.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[
-            {
-                "role": "user",
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": image_bytes}},
-                ],
-            }
-        ],
-    )
+    contents = [
+        {
+            "role": "user",
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_bytes}},
+            ],
+        }
+    ]
+
+    result, model = gemini_generate(contents)
+    print(f"[RATES] MECO OCR via {model}")
 
     raw = (result.text or "").strip()
     try:
@@ -113,13 +157,10 @@ Return ONLY JSON like this:
 Do NOT include code blocks or explanations.
 """
 
-    # call Gemini without search tool - uses trained knowledge
-    result = client_gemini.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[prompt],
-    )
+    result, model = gemini_generate([prompt])
+    print(f"[RATES] VECO lookup via {model}")
 
-    raw = result.text.strip()
+    raw = (result.text or "").strip()
 
     # --- CLEANING PHASE ---
     # remove ```json ... ```
@@ -187,43 +228,69 @@ def save_rate_if_not_exists(city, year, month, rate):
 # -----------------------------
 # MAIN
 # -----------------------------
+def rate_exists(city, year, month):
+    key = f"{int(month):02d}"
+    return db.reference(f"city/{city}/{int(year)}/{key}").get() is not None
+
+
 def scheduled_rates_update():
     print("[RATES] Starting update...")
-    veco_rate = None
-    meco_rate = None
-    meco_year = 2026
-    meco_month = 5
-    
-    # MECO
+    result = {"meco": None, "veco": None, "skipped": False}
+
+    now = datetime.now()
+    if rate_exists("Lapu-Lapu_City", now.year, now.month) and rate_exists(
+        "Mandaue_City", now.year, now.month
+    ):
+        print(f"[RATES] {now.year}/{now.month:02d} already stored for both cities - nothing to do")
+        result["skipped"] = True
+        return result
+
+    meco_year = meco_month = meco_img_url = None
     try:
-        print("[RATES] Fetching MECO image...")
-        meco_img, meco_year, meco_month = get_latest_meco_image_bytes()
-        print(f"[RATES] MECO image found: {meco_img is not None}, {meco_year}-{meco_month}")
-        
-        if meco_img:
-            print("[RATES] Extracting MECO rate from image...")
+        meco_year, meco_month, meco_img_url = find_latest_meco_image_url()
+    except Exception as e:
+        print(f"[RATES] MECO page lookup error: {e}")
+
+    if meco_year is None:
+        print("[RATES] No MECO page found in the last 12 months")
+    elif rate_exists("Lapu-Lapu_City", meco_year, meco_month):
+        print(f"[RATES] MECO {meco_year}/{meco_month:02d} already stored - skipping lookup")
+    else:
+        try:
+            print(f"[RATES] Fetching MECO image for {meco_year}/{meco_month:02d}")
+            meco_img = download_image_bytes(meco_img_url)
             meco_rate = extract_meco_rate(meco_img)
             print(f"[RATES] MECO rate: {meco_rate}")
-        else:
-            print("[RATES] No MECO image found")
-    except Exception as e:
-        print(f"[RATES] MECO error: {e}")
-    
-    # VECO
-    try:
-        print("[RATES] Fetching VECO rate...")
-        veco_data = extract_veco_rate()
-        print(f"[RATES] VECO data: {veco_data}")
-        veco_rate = veco_data.get("total_average_rate")
-    except Exception as e:
-        print(f"[RATES] VECO error: {e}")
+            if meco_rate:
+                save_rate_if_not_exists(
+                    "Lapu-Lapu_City", meco_year, f"{meco_month:02d}", meco_rate
+                )
+                result["meco"] = meco_rate
+        except Exception as e:
+            print(f"[RATES] MECO error: {e}")
 
-    # Save even if partial
-    if meco_rate:
-        save_rate_if_not_exists("Lapu-Lapu_City", meco_year, f"{meco_month:02d}", meco_rate)
-    if veco_rate:
-        save_rate_if_not_exists("Mandaue_City", meco_year, f"{meco_month:02d}", veco_rate)
+    veco_year = meco_year if meco_year else now.year
+    veco_month = meco_month if meco_month else now.month
 
-    print("[RATES] Done:", {"meco": meco_rate, "veco": veco_rate})
+    if rate_exists("Mandaue_City", veco_year, veco_month):
+        print(f"[RATES] VECO {veco_year}/{veco_month:02d} already stored - skipping lookup")
+    else:
+        try:
+            print("[RATES] Fetching VECO rate...")
+            veco_data = extract_veco_rate()
+            print(f"[RATES] VECO data: {veco_data}")
+            veco_rate = veco_data.get("total_average_rate")
+            if veco_rate is None:
+                print("[RATES] VECO rate missing")
+            elif not 5.0 <= veco_rate <= 25.0:
+                print(f"[RATES] VECO rate out of range ({veco_rate}) - not saved")
+            else:
+                save_rate_if_not_exists(
+                    "Mandaue_City", veco_year, f"{veco_month:02d}", veco_rate
+                )
+                result["veco"] = veco_rate
+        except Exception as e:
+            print(f"[RATES] VECO error: {e}")
 
-    return {"meco": meco_rate, "veco": veco_rate}
+    print("[RATES] Done:", result)
+    return result
